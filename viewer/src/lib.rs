@@ -16,6 +16,7 @@ mod catalog_switcher;
 mod database_details;
 mod remote;
 mod branding;
+mod image_search;
 
 use chrono::{Datelike, Local, Months, NaiveDate};
 use crossbeam_channel::{Receiver, Sender};
@@ -52,6 +53,8 @@ impl Default for ExploreVisual { fn default() -> Self { Self::Folders } }
 #[derive(Serialize, Deserialize)]
 struct SavedState {
     search: String,
+    #[serde(default)]
+    reference_image: Option<PathBuf>,
     visual_source: Option<i64>,
     folder: Option<String>,
     from_day: Option<String>,
@@ -243,6 +246,8 @@ pub struct Viewer {
     calendar_year: i32,
     calendar_month: u32,
     cached_vector: Option<(String, Vec<f32>)>,
+    image_search: image_search::Source,
+    pending_model_key: Option<String>,
     visual_source: Option<i64>,
     phase: u8,
     relevance: f64,
@@ -473,6 +478,8 @@ impl Viewer {
             calendar_year: Local::now().year(),
             calendar_month: Local::now().month(),
             cached_vector: None,
+            image_search: image_search::Source::default(),
+            pending_model_key: None,
             visual_source: None,
             phase: 0,
             relevance: 0.22,
@@ -780,14 +787,16 @@ impl Viewer {
 
                 }
                 model::Event::Vector { generation, vector } if generation == self.generation => {
-                    self.cached_vector = Some((self.search.clone(), vector));
+                    let key = self.pending_model_key.take().unwrap_or_else(|| self.query_key());
+                    if key != self.query_key() { self.submit_search(); continue; }
+                    self.cached_vector = Some((key, vector));
                     self.phase = 1;
                     self.page_loading = true;
                     self.page_error = false;
                     self.facets_loading = true;
                     self.request_explore(0, true);
                 }
-                model::Event::Error(error) => {
+                model::Event::Error { generation, error } if generation == self.generation => {
                     self.visual_pending = false;
                     self.model_error = Some(error.clone());
                     self.message = error;
@@ -861,6 +870,41 @@ impl Viewer {
 
     fn submit_search(&mut self) {self.begin_search(200);}
 
+    fn query_key(&self) -> String {
+        self.image_search.key().unwrap_or_else(|| self.search.clone())
+    }
+
+    fn model_request(&self) -> model::Request {
+        if let Some(path) = &self.image_search.path {
+            model::Request::EncodeImage { generation: self.generation, path: path.clone() }
+        } else {
+            model::Request::Encode { generation: self.generation, text: self.search.clone() }
+        }
+    }
+
+    fn reference_action(&mut self, action: image_search::Action) {
+        match action {
+            image_search::Action::Select(path) => {
+                if let Err(error) = self.image_search.set(path) { self.message = error; return; }
+                self.search.clear();
+                self.visual_source = None;
+                self.cached_vector = None;
+                self.model_error = None;
+                self.relevance = 0.5;
+                self.sort = SortSpec::default();
+                self.submit_search();
+            }
+            image_search::Action::Clear => {
+                self.image_search.path = None;
+                self.cached_vector = None;
+                self.model_error = None;
+                self.relevance = 0.22;
+                self.submit_search();
+            }
+            image_search::Action::Error(error) => self.message = error,
+        }
+    }
+
     fn begin_search(&mut self,span:i64) {
         self.refresh_span=span;
         self.generation += 1;
@@ -871,7 +915,7 @@ impl Viewer {
         self.preview_photo = None;
         self.visual_results = None;
         self.visual_complete = false;
-        let query = self.search.clone();
+        let query = self.query_key();
         if self
             .cached_vector
             .as_ref()
@@ -891,11 +935,9 @@ impl Viewer {
         self.visual_pending =
             !query.trim().is_empty() && self.visual_source.is_none() && self.model_error.is_none() && self.phase == 0;
         self.model_queue_pending=false;
+        self.pending_model_key = self.visual_pending.then_some(query);
         if self.visual_pending {
-            self.model_queue_pending = self.model_tx.try_send(model::Request::Encode {
-                generation: self.generation,
-                text: query,
-            }).is_err();
+            self.model_queue_pending = self.model_tx.try_send(self.model_request()).is_err();
         }
     }
 
@@ -1201,12 +1243,14 @@ impl Viewer {
                 Ok(())
             }
             ImageAction::Similar => {
+                self.image_search.path = None;
                 self.search.clear();
                 self.visual_source = Some(photo.id);
                 self.submit_search();
                 Ok(())
             }
             ImageAction::ExactDuplicates => {
+                self.image_search.path = None;
                 self.visual_source = None;
                 self.search.clear();
                 self.filters.push(FilterChip { field: "duplicate_of".into(),
@@ -1215,6 +1259,7 @@ impl Viewer {
                 Ok(())
             }
             ImageAction::ExpandStack => {
+                self.image_search.path = None;
                 self.visual_source = None;
                 self.search.clear();
                 self.map_root = None;
@@ -1228,6 +1273,7 @@ impl Viewer {
                 Ok(())
             }
             ImageAction::NearDuplicates => {
+                self.image_search.path = None;
                 self.visual_source = None;
                 self.search.clear();
                 self.filters.push(FilterChip { field: "near_of".into(),
@@ -1283,6 +1329,7 @@ impl Viewer {
     fn saved_state(&self) -> serde_json::Value {
         serde_json::to_value(SavedState {
             search: self.search.clone(), folder: self.map_root.clone(),
+            reference_image: self.image_search.path.clone(),
             visual_source: self.visual_source,
             from_day: self.from_day.clone(), to_day: self.to_day.clone(),
             relevance: self.relevance, filters: self.filters.clone(), sort: self.sort,
@@ -1299,6 +1346,7 @@ impl Viewer {
         match serde_json::from_value::<SavedState>(state) {
             Ok(state) => {
                 self.search = state.search;
+                self.image_search.path = state.reference_image;
                 self.visual_source = state.visual_source;
                 self.map_root = state.folder;
                 self.from_day = state.from_day;
@@ -1320,6 +1368,7 @@ impl Viewer {
     }
 
     fn images_ui(&mut self, ui: &mut egui::Ui) {
+        if let Some(action) = self.image_search.controls(ui) { self.reference_action(action); }
         ui.horizontal_wrapped(|ui| {
             ui.label("Search photos");
             let input = ui.add(
@@ -1328,6 +1377,10 @@ impl Viewer {
                     .hint_text("dog, beach sunset, a person's name..."),
             ).on_hover_text("Search filenames, paths, tags, named people, and image content; other filters remain active");
             if input.changed() {
+                if self.image_search.path.take().is_some() {
+                    self.relevance = 0.22;
+                    self.model_error = None;
+                }
                 self.visual_source = None;
                 self.search_changed = Instant::now();
                 self.search_sent = false;
@@ -1344,7 +1397,7 @@ impl Viewer {
                 ui.add(egui::Label::new(format!("Visual index: {}/{}",self.embedded,self.indexed)).extend()).on_hover_text("Images with compatible visual-search embeddings / indexed images");
             }
         });
-        if !self.search.trim().is_empty() || self.visual_source.is_some() {
+        if !self.search.trim().is_empty() || self.visual_source.is_some() || self.image_search.path.is_some() {
             if let Some(error) = &self.model_error {
                 ui.colored_label(
                     egui::Color32::LIGHT_RED,
@@ -1370,7 +1423,7 @@ impl Viewer {
                     "Showing first visual matches · counts and charts are partial"
                 });
             }
-            if ui.add(egui::Slider::new(&mut self.relevance, 0.08..=0.45).text("Relevance")).changed() {
+            if ui.add(egui::Slider::new(&mut self.relevance, 0.08..=0.95).text("Relevance")).changed() {
                 self.submit_search();
             }
         }
@@ -2841,7 +2894,7 @@ impl Viewer {
         }
         self.receive(&ctx);
         if self.model_queue_pending&&self.visual_pending&&self.search_sent {
-            self.model_queue_pending=self.model_tx.try_send(model::Request::Encode{generation:self.generation,text:self.search.clone()}).is_err();
+            self.model_queue_pending=self.model_tx.try_send(self.model_request()).is_err();
             if self.model_queue_pending{ctx.request_repaint_after(Duration::from_millis(100));}
         }
         #[cfg(debug_assertions)] if self.screenshot_path.is_some(){

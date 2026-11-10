@@ -50,6 +50,15 @@ class Embedder:
             vector = vector / vector.norm(dim=-1, keepdim=True)
         return vector[0].float().cpu().tolist()
 
+    def reference_image(self, path: Path):
+        from .image_query import open_reference
+        with open_reference(path) as source:
+            pixels = self.preprocess(source).unsqueeze(0).to(self.device)
+        with self.torch.inference_mode():
+            vector = self.model.encode_image(pixels)
+            vector = vector / vector.norm(dim=-1, keepdim=True)
+        return vector[0].float().cpu().tolist()
+
     def close(self):
         del self.model
         if self.device == "cuda":
@@ -117,6 +126,9 @@ class EmbeddingWorkerClient:
 
     def text(self, query: str):
         return self._request("text", query)
+
+    def reference_image(self, path: Path):
+        return self._request('reference-image', str(path))
 
     def close(self):
         if self.process.poll() is None:

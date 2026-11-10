@@ -610,6 +610,18 @@ def similar(image_id: int, limit: int = 20):
     emit(rows)
 
 
+@app.command('image-search')
+def image_search(image: Path, limit: int = typer.Option(30, min=1, max=500), cpu: bool = False):
+    """Find catalog images resembling a reference file, without indexing it."""
+    from .image_query import encode_reference, search
+    try:
+        vector = encode_reference(image, cpu=cpu)
+        with connect() as conn:
+            emit(search(conn, vector, limit=limit))
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
 @app.command()
 def duplicates(near: bool = False, max_distance: int = 5, limit: int = 100):
     """List exact hash groups, or candidate near-duplicates by difference hash."""

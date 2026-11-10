@@ -32,6 +32,7 @@ fn execute(task:Task)->Result<ResultData,String>{
 }
 
 struct RemoteViewer {
+    image_search: crate::image_search::Source, image_vector: Option<Value>, image_key: Option<String>,
     query:String, mode:String, offset:usize, total:usize, items:Vec<Value>, selected:Option<i64>,
     queue:Queue,active:Arc<AtomicU64>,generation:u64,
     rx:crossbeam_channel::Receiver<(u64,ResultData)>,
@@ -60,7 +61,7 @@ impl RemoteViewer {
                 }else{std::thread::sleep(Duration::from_millis(20));}
             });
         }
-        let mut app=Self{query:String::new(),mode:"combined".into(),offset:0,total:0,items:vec![],selected:None,
+        let mut app=Self{image_search:Default::default(),image_vector:None,image_key:None,query:String::new(),mode:"combined".into(),offset:0,total:0,items:vec![],selected:None,
             queue,active,generation:0,rx,cache:HashMap::new(),pending:HashSet::new(),failed:HashSet::new(),
             frame:0,message:String::new(),loading:false,last_image_click:None};
         #[cfg(debug_assertions)] if let Ok(query)=std::env::var("IMAGE_CLI_QA_QUERY"){app.query=query;app.mode="text".into();}
@@ -69,7 +70,29 @@ impl RemoteViewer {
     fn search(&mut self){
         self.generation+=1;self.active.store(self.generation,Ordering::Release);
         self.queue.lock().unwrap().clear();self.pending.clear();self.failed.clear();self.cache.clear();self.items.clear();self.selected=None;self.last_image_click=None;self.loading=true;
-        self.queue.lock().unwrap().push_front((self.generation,Task::Search(json!({"q":self.query,"mode":self.mode,"limit":100,"offset":self.offset}))));
+        let key = self.image_search.key();
+        if key != self.image_key { self.image_vector = None; }
+        self.image_key = key;
+        let mut args = json!({"q":self.query,"mode":self.mode,"limit":100,"offset":self.offset});
+        if let Some(path) = &self.image_search.path {
+            if let Some(vector) = &self.image_vector { args["image_vector"] = vector.clone(); }
+            else { args["image_path"] = path.to_string_lossy().into_owned().into(); }
+        }
+        self.queue.lock().unwrap().push_front((self.generation,Task::Search(args)));
+    }
+    fn reference_action(&mut self, action: crate::image_search::Action) {
+        match action {
+            crate::image_search::Action::Select(path) => {
+                if let Err(error) = self.image_search.set(path) { self.message = error; return; }
+                self.query.clear(); self.mode = "visual".into(); self.offset = 0;
+                self.image_vector = None; self.search();
+            }
+            crate::image_search::Action::Clear => {
+                self.image_search.path = None; self.image_vector = None;
+                self.mode = "combined".into(); self.offset = 0; self.search();
+            }
+            crate::image_search::Action::Error(error) => self.message = error,
+        }
     }
     fn want(&mut self,id:i64,preview:bool,priority:bool){
         let key=(id,preview);
@@ -104,7 +127,7 @@ impl RemoteViewer {
         for(generation,result)in self.rx.try_iter().take(12){
             if generation!=self.generation{continue;}
             match result {
-                ResultData::Search(value)=>{self.total=value["total"].as_u64().unwrap_or(0)as usize;self.items=value["items"].as_array().cloned().unwrap_or_default();self.loading=false;self.message=format!("{} · {} results",value["catalog_name"].as_str().unwrap_or("Remote catalog"),self.total);},
+                ResultData::Search(value)=>{if self.image_search.path.is_some() { self.image_vector = value.get("reference_vector").cloned(); } self.total=value["total"].as_u64().unwrap_or(0)as usize;self.items=value["items"].as_array().cloned().unwrap_or_default();self.loading=false;self.message=format!("{} · {} results",value["catalog_name"].as_str().unwrap_or("Remote catalog"),self.total);},
                 ResultData::Image(id,preview,pixels)=>{self.pending.remove(&(id,preview));let texture=ctx.load_texture(format!("remote-{id}-{preview}"),pixels,egui::TextureOptions::LINEAR);self.cache.insert((id,preview),Entry{texture,used:self.frame});},
                 ResultData::Original(path)=>self.message=format!("Downloaded and opened {path}"),
                 ResultData::ImageError(id,preview,error)=>{self.pending.remove(&(id,preview));self.failed.insert((id,preview));self.message=error;},
@@ -144,11 +167,15 @@ impl RemoteViewer {
         }
         ui.horizontal_wrapped(|ui|{ui.heading("Remote images");crate::branding::about_button(ui);});
         crate::branding::about_ui(&ctx);
+        if let Some(action) = self.image_search.controls(ui) { self.reference_action(action); }
         let mut submit=false;
         ui.horizontal_wrapped(|ui|{
             let edit=ui.add(egui::TextEdit::singleline(&mut self.query).hint_text("Search images").desired_width(360.));
+            if edit.changed() && self.image_search.path.take().is_some() { self.image_vector = None; self.mode = "combined".into(); }
             submit|=edit.lost_focus()&&ui.input(|i|i.key_pressed(egui::Key::Enter));
-            egui::ComboBox::from_id_salt("remote-mode").selected_text(&self.mode).show_ui(ui,|ui|{for mode in ["combined","text","visual"]{ui.selectable_value(&mut self.mode,mode.into(),mode);}});
+            ui.add_enabled_ui(self.image_search.path.is_none(), |ui| {
+                egui::ComboBox::from_id_salt("remote-mode").selected_text(&self.mode).show_ui(ui,|ui|{for mode in ["combined","text","visual"]{ui.selectable_value(&mut self.mode,mode.into(),mode);}});
+            });
             submit|=ui.button("Search").clicked();
             if ui.add_enabled(self.offset>0&&!self.loading,egui::Button::new("Previous")).clicked(){self.offset=self.offset.saturating_sub(100);self.search();}
             if ui.add_enabled(self.offset+100<self.total&&!self.loading,egui::Button::new("Next")).clicked(){self.offset+=100;self.search();}
@@ -247,7 +274,7 @@ mod tests {
     use super::*;
     fn fixture()->RemoteViewer{
         let(_,rx)=crossbeam_channel::unbounded();
-        RemoteViewer{query:String::new(),mode:"combined".into(),offset:0,total:1,
+        RemoteViewer{image_search:Default::default(),image_vector:None,image_key:None,query:String::new(),mode:"combined".into(),offset:0,total:1,
             items:vec![json!({"id":1,"path":"G:/Marketing/smores.jpg","width":6000,"height":4000,"format":"JPEG","has_preview":true})],selected:None,
             queue:Arc::new(Mutex::new(VecDeque::new())),active:Arc::new(AtomicU64::new(1)),generation:1,
             rx,cache:HashMap::new(),pending:HashSet::new(),failed:HashSet::new(),frame:0,message:String::new(),loading:false,last_image_click:None}
@@ -257,6 +284,20 @@ mod tests {
         let mut app=fixture();app.want(1,true,false);app.want(2,true,false);app.want(2,true,true);
         assert!(matches!(app.queue.lock().unwrap().front(),Some((1,Task::Image(2,true)))));
         app.search();assert_eq!(app.queue.lock().unwrap().len(),1);assert_eq!(app.active.load(Ordering::Acquire),2);assert!(app.pending.is_empty());
+    }
+    #[test]
+    fn reference_queries_reuse_vectors_for_paging_and_invalidate_changed_sources() {
+        let mut app = fixture();
+        let path = std::env::temp_dir().join(format!("remote-reference-{}.png",std::process::id()));
+        std::fs::write(&path,b"fixture").unwrap();
+        app.reference_action(crate::image_search::Action::Select(path.clone()));
+        assert!(matches!(app.queue.lock().unwrap().front(),Some((_,Task::Search(args))) if args.get("image_path").is_some()));
+        let mut vector=vec![0.0;512];vector[0]=1.0;app.image_vector=Some(json!(vector));
+        app.offset=100;app.search();
+        assert!(matches!(app.queue.lock().unwrap().front(),Some((_,Task::Search(args))) if args.get("image_path").is_none()&&args.get("image_vector").is_some()&&args["offset"]==100));
+        std::fs::write(&path,b"changed source").unwrap();app.search();
+        assert!(matches!(app.queue.lock().unwrap().front(),Some((_,Task::Search(args))) if args.get("image_path").is_some()&&args.get("image_vector").is_none()));
+        std::fs::remove_file(path).unwrap();
     }
     #[test]
     fn remote_controls_layout_in_both_themes_and_sizes(){

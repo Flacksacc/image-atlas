@@ -4,7 +4,7 @@ import psycopg
 from pathlib import Path
 import threading
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, Response
 from fastapi.responses import JSONResponse
 from PIL import Image, ImageOps
@@ -32,6 +32,7 @@ def configure_security(host, *, secure=False, allowed_hosts=()):
     app.state.allowed_hosts.update(name.lower() for name in allowed_hosts)
 COLLECTION_JOBS = {}
 COLLECTION_JOB_LOCK = threading.Lock()
+IMAGE_SEARCH_LOCK = threading.Lock()
 
 
 @app.middleware('http')
@@ -45,7 +46,8 @@ async def catalog_context(request, call_next):
             identifier, remainder = path[len(prefix):].split('/', 1)
             catalog = resolve(identifier)
             current.set(catalog)
-            if catalog.readonly and request.method not in {'GET', 'HEAD'} and not remainder.startswith('cancel/'):
+            if (catalog.readonly and request.method not in {'GET', 'HEAD'}
+                    and not remainder.startswith('cancel/') and remainder not in {'search/image', 'search/image/page'}):
                 return JSONResponse({'detail': 'Catalog is read-only; assign folders before editing'}, status_code=403)
             request.scope['path'] = '/api/' + remainder
             request.scope['raw_path'] = request.scope['path'].encode()
@@ -153,7 +155,7 @@ main{padding:20px 28px}.grid{display:grid;grid-template-columns:repeat(auto-fill
 .group img{width:120px;height:120px;object-fit:cover} .faces{display:flex;flex-wrap:wrap;gap:6px}.hint{color:#9fb3bf}pre{white-space:pre-wrap;word-break:break-word}
 header h1{display:flex;align-items:center;gap:10px}dialog{max-width:min(360px,85vw);max-height:85vh;overflow:auto;text-align:center;background:#17242d;color:#e9eef2;border:1px solid #63717a;border-radius:12px;padding:24px}dialog img{display:block;margin:auto}dialog a{color:#8ddded}dialog::backdrop{background:#0009}
 </style></head><body><header><h1><img src="/logo.png" alt="" width="42" height="42"> ImageAtlas</h1><nav><button title="Review, sort, and group indexed images" onclick="loadImages()">Images</button><button title="Review face samples and assign or ignore person identities" onclick="loadGroups()">People</button><button title="Review suggested file destinations without moving originals" onclick="loadProposals()">Sort proposals</button><button onclick="document.getElementById('about-dialog').showModal()">About ImageAtlas</button></nav>
-<p><input id="query" placeholder="Search filename"><button onclick="loadImages()">Search</button> <label><input id="show-missing" type="checkbox" onchange="loadImages()"> Show missing files</label></p><div id="sort-tools"></div></header><main id="main"></main>
+<p><input id="query" placeholder="Search filename"><button onclick="loadImages()">Search</button> <button onclick="document.getElementById('image-query').click()">Search by image…</button><input id="image-query" type="file" accept="image/*" hidden> <label><input id="show-missing" type="checkbox" onchange="loadImages()"> Show missing files</label></p><div id="sort-tools"></div></header><main id="main"></main>
 <dialog id="about-dialog" aria-labelledby="about-title"><img src="/logo.png" alt="ImageAtlas globe made of photographs" width="160" height="160"><h2 id="about-title">ImageAtlas</h2><p>Version __IMAGEATLAS_VERSION__</p><p>Find, explore, and organize your image library.</p><p><a href="https://github.com/Flacksacc/image-atlas">GitHub repository</a></p><form method="dialog"><button>Close</button></form></dialog>
 <script>
 const main=document.getElementById('main');const escapeHtml=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -168,7 +170,7 @@ function sortToolbar(){document.getElementById('sort-tools').innerHTML='<div cla
 function quickSort(key){if(sortField===key)sortDescending=!sortDescending;else{sortField=key;sortDescending=!['Filename','Path','Folder','Format','Camera'].includes(key)}loadImages()}
 function imageCard(x){let hint=x.path+' · '+x.width+' × '+x.height+' · '+x.size_bytes+' bytes · Date '+(x.capture_day||'unknown')+' · Camera '+(x.camera_model||'unknown')+' · '+x.rating+' stars · '+x.review_state;return '<div class="card" title="'+escapeHtml(hint)+'"><img loading="lazy" alt="Image #'+x.id+'" src="/api/images/'+x.id+'/thumb"><b>#'+x.id+(x.missing?' · Missing original':'')+'</b><small>'+escapeHtml(x.path)+'</small><small title="Saved collections">'+escapeHtml(x.collections||'')+'</small></div>'}
 function renderImages(){let body='';if(groupField==='None')body='<div class="grid">'+imageRows.map(imageCard).join('')+'</div>';else{let groups=new Map();for(let x of imageRows){let key=x.image_group||'Unknown';if(!groups.has(key))groups.set(key,[]);groups.get(key).push(x)}for(let [key,rows] of groups)body+='<h2 class="group-heading" title="'+escapeHtml(key)+'">'+escapeHtml(key)+'</h2><div class="grid">'+rows.map(imageCard).join('')+'</div>'}main.innerHTML='<p class="hint" title="Sorting and grouping apply before pagination">'+imageRows.length+' images loaded'+(collectionFilter?' · Collection #'+collectionFilter+' <button title="Show all catalog images" onclick="collectionFilter=null;loadImages()">Clear collection filter</button>':'')+'</p>'+body+(hasMore?'<p><button id="load-more" title="Load the next page in the current sort order" onclick="loadImages(true)">Load more</button></p>':'')}
-async function loadImages(append=false){activeView='images';let generation=append?imageGeneration:++imageGeneration;sortToolbar();let q=document.getElementById('query').value;let missing=document.getElementById('show-missing').checked;if(!append)imageRequestParams={q,include_missing:missing,sort:sortField,descending:sortDescending,secondary:secondaryField,secondary_descending:secondaryDescending,group_by:groupField,limit:imagePageSize,...(collectionFilter?{collection_id:collectionFilter}:{})};let params=new URLSearchParams({...imageRequestParams,offset:append?imageRows.length:0});let more=document.getElementById('load-more');if(more)more.disabled=true;try{let data=await get('/api/images?'+params);if(generation!==imageGeneration||activeView!=='images')return;imageRows=append?imageRows.concat(data):data;hasMore=data.length===imagePageSize;renderImages()}catch(e){if(generation===imageGeneration&&activeView==='images')main.innerHTML='<p role="alert">'+escapeHtml(e.message)+'</p>';if(more)more.disabled=false}}
+async function loadImages(append=false){if(typeof referenceVector!=='undefined'&&referenceVector){if(collectionFilter){referenceVector=null;referenceFileName='';}else return loadReferenceImages(append);}activeView='images';let generation=append?imageGeneration:++imageGeneration;sortToolbar();let q=document.getElementById('query').value;let missing=document.getElementById('show-missing').checked;if(!append)imageRequestParams={q,include_missing:missing,sort:sortField,descending:sortDescending,secondary:secondaryField,secondary_descending:secondaryDescending,group_by:groupField,limit:imagePageSize,...(collectionFilter?{collection_id:collectionFilter}:{})};let params=new URLSearchParams({...imageRequestParams,offset:append?imageRows.length:0});let more=document.getElementById('load-more');if(more)more.disabled=true;try{let data=await get('/api/images?'+params);if(generation!==imageGeneration||activeView!=='images')return;imageRows=append?imageRows.concat(data):data;hasMore=data.length===imagePageSize;renderImages()}catch(e){if(generation===imageGeneration&&activeView==='images')main.innerHTML='<p role="alert">'+escapeHtml(e.message)+'</p>';if(more)more.disabled=false}}
 let groupRows=[];
 async function loadGroups(append=false){activeView='people';let generation=++imageGeneration;document.getElementById('sort-tools').innerHTML='';if(!append)groupRows=[];let [data,people]=await Promise.all([get('/api/groups?limit=100&offset='+groupRows.length),get('/api/people')]);if(generation!==imageGeneration||activeView!=='people')return;groupRows=append?groupRows.concat(data):data;main.innerHTML='<h2>Face groups</h2><p class="hint">Review each group before applying a name. New matches remain suggestions.</p><div class="grid">'+groupRows.map(g=>
 '<div class="card group" title="Review the face samples, then select a person ID or ignore the identity"><b>Group #'+g.group_id+' · '+g.face_count+' faces</b><p>'+escapeHtml(g.person||('Suggested: '+(g.suggested_person||'unassigned')))+'</p><div class="faces">'+g.face_ids.map(id=>'<img title="Face sample #'+id+'" loading="lazy" src="/api/faces/'+id+'/thumb">').join('')+'</div><p><select title="Reuse an existing stable person ID or create a new name" id="person-'+g.group_id+'"><option value="">New person</option>'+people.map(p=>'<option value="'+p.id+'"'+(p.id===(g.person_id||g.suggested_person_id)?' selected':'')+'>'+escapeHtml(p.name)+' (#'+p.id+')</option>').join('')+'</select><input id="name-'+g.group_id+'" placeholder="Person name"><button onclick="tag('+g.group_id+')" title="Assign all current faces in this sample set">Save person</button><button onclick="ignoreGroup('+g.group_id+')" title="Ignore this identity and future confident matches, retaining recognition samples">Ignore person</button></p></div>').join('')+'</div>'+(data.length===100?'<p><button title="Load the next 100 reviewable groups" onclick="loadGroups(true)">Load more face groups</button></p>':'')}
@@ -189,7 +191,7 @@ def home():
     bootstrap = '<script>const CATALOG_DEFAULT=' + json.dumps(initial_catalog) + ';</script><script src="/catalogs.js"></script>'
     return HTML.replace('__IMAGEATLAS_VERSION__', __version__).replace('<script>', bootstrap + '<script>', 1).replace('src="/api/', 'src="\'+catalogPrefix+\'/').replace('</nav>', '<button title="Browse and edit events, trips, and places" onclick="loadCollections()">Collections</button><select id="catalog-selector" title="Catalog for this tab"></select><button title="Create, register, switch, inspect, back up, and restore databases" onclick="manageCatalogs()">Databases</button></nav>').replace(
         'loadImages().catch', "groupOptions.push(['Event','Event'],['Trip','Trip'],['Place','Place']);for(let k of ['Event','Trip','Place'])groupHints[k]='Group by saved '+k.toLowerCase()+' collections; an image appears once.';loadImages().catch").replace(
-        '</body>', '<script src="/collections.js"></script></body>')
+        '</body>', '<script src="/collections.js"></script><script src="/image-search.js"></script></body>')
 
 
 @app.get('/catalogs.js')
@@ -266,6 +268,54 @@ def images(q: str = "", include_missing: bool = False, limit: int = Query(100, g
 def collections_script():
     script = Path(__file__).with_name('web_collections.js').read_text(encoding='utf-8')
     return Response(script.replace('src="/api/', 'src="\'+catalogPrefix+\'/'), media_type='application/javascript')
+
+
+@app.post('/api/search/image')
+async def search_reference(request: Request, include_missing: bool = False):
+    import tempfile
+    from starlette.concurrency import run_in_threadpool
+    from .image_query import MAX_BYTES, encode_reference, search
+    size = 0
+    with tempfile.TemporaryDirectory(prefix='imageatlas-reference-') as folder:
+        path = Path(folder) / 'reference.img'
+        with path.open('wb') as output:
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > MAX_BYTES:
+                    raise HTTPException(413, 'Reference images must be 32 MiB or smaller')
+                output.write(chunk)
+        def query():
+            with IMAGE_SEARCH_LOCK:
+                vector = encode_reference(path)
+            with connect() as conn:
+                rows = search(conn, vector, include_missing=include_missing)
+            return {'items': rows, 'vector': vector}
+        try:
+            return await run_in_threadpool(query)
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+
+class ReferencePage(BaseModel):
+    vector: list[float]
+    offset: int = 0
+    include_missing: bool = False
+
+
+@app.post('/api/search/image/page')
+def search_reference_page(request: ReferencePage):
+    from .image_query import search
+    try:
+        with connect() as conn:
+            return search(conn, request.vector, offset=request.offset, include_missing=request.include_missing)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get('/image-search.js')
+def image_search_script():
+    return Response(Path(__file__).with_name('web_image_search.js').read_text(encoding='utf-8'),
+                    media_type='application/javascript')
 
 
 class CollectionReview(BaseModel):

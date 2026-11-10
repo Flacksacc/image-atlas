@@ -3,8 +3,8 @@ use eframe::egui;
 use serde::Deserialize;
 use std::{io::{BufRead, BufReader, Read, Write}, process::{Child, Command, Stdio}, sync::{Arc, atomic::{AtomicU64, Ordering}}, thread, time::Duration};
 
-pub enum Request { Encode { generation: u64, text: String }, Retry }
-pub enum Event { Ready, Vector { generation: u64, vector: Vec<f32> }, Error(String) }
+pub enum Request { Encode { generation: u64, text: String }, EncodeImage { generation: u64, path: std::path::PathBuf }, Retry }
+pub enum Event { Ready, Vector { generation: u64, vector: Vec<f32> }, Error { generation: u64, error: String } }
 #[derive(Deserialize)] struct WorkerResponse { embedding: Option<Vec<f32>>, error: Option<String> }
 
 struct Worker { child: Child, input: Sender<Vec<u8>>, replies: Receiver<Result<String,String>>,
@@ -38,7 +38,10 @@ impl Worker {
         Ok(Self{child,input,replies,#[cfg(windows)] _tree:tree})
     }
     fn encode(&mut self,text:&str,timeout:Duration)->anyhow::Result<Vec<f32>> {
-        let value=serde_json::json!({"operation":"text","value":text});
+        self.encode_operation("text", text, timeout)
+    }
+    fn encode_operation(&mut self, operation: &str, text: &str, timeout: Duration) -> anyhow::Result<Vec<f32>> {
+        let value=serde_json::json!({"operation":operation,"value":text});
         anyhow::ensure!(text.len()<=65536,"Search text is too long");
         let mut bytes=serde_json::to_vec(&value)?;bytes.push(b'\n');
         self.input.send_timeout(bytes,timeout).map_err(|_|anyhow::anyhow!("Model input timed out"))?;
@@ -55,7 +58,11 @@ pub fn start(ui:egui::Context,active:Arc<AtomicU64>,python:Option<String>)->(Sen
         let mut worker:Option<Worker>=None;
         for request in requests {
             if matches!(request,Request::Retry){worker=None;continue;}
-            let Request::Encode{generation,text}=request else{continue;};
+            let (generation, operation, text) = match request {
+                Request::Encode { generation, text } => (generation, "text", text),
+                Request::EncodeImage { generation, path } => (generation, "reference-image", path.to_string_lossy().into_owned()),
+                Request::Retry => continue,
+            };
             if generation!=active.load(Ordering::Relaxed){continue;}
             let result=(|| -> anyhow::Result<Vec<f32>> {
                 if worker.is_none(){
@@ -63,9 +70,9 @@ pub fn start(ui:egui::Context,active:Arc<AtomicU64>,python:Option<String>)->(Sen
                     started.encode("photo",Duration::from_secs(180))?;
                     worker=Some(started);let _=events.send(Event::Ready);ui.request_repaint();
                 }
-                worker.as_mut().unwrap().encode(&text,Duration::from_secs(60))
+                worker.as_mut().unwrap().encode_operation(operation,&text,Duration::from_secs(60))
             })();
-            let event=match result{Ok(vector)=>Event::Vector{generation,vector},Err(error)=>{worker=None;Event::Error(format!("Visual search unavailable: {error}"))}};
+            let event=match result{Ok(vector)=>Event::Vector{generation,vector},Err(error)=>{worker=None;Event::Error{generation,error:format!("Visual search unavailable: {error}")}}};
             if events.send(event).is_err(){break;}ui.request_repaint();
         }
     });(request_tx,event_rx)

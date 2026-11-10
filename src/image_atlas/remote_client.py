@@ -61,9 +61,16 @@ def get_json(path):
         return json.load(response)
 
 
-def search(q, *, mode='combined', limit=100, offset=0, min_pixels=0, orientation='any', format=''):
+def search(q='', *, mode='combined', limit=100, offset=0, min_pixels=0, orientation='any', format='', image_vector=None):
+    if image_vector is not None:
+        from .image_query import validate_vector
+        from .embeddings import MODEL_ID
+        if get_json('/v1/session').get('image_search_model') != MODEL_ID:
+            raise ValueError('Update the remote ImageAtlas server before searching by image')
+        image_vector = json.dumps([round(value, 7) for value in validate_vector(image_vector)], separators=(',', ':'))
     result = get_json('/v1/images?'+urlencode(dict(q=q, mode=mode, limit=limit, offset=offset,
-                          min_pixels=min_pixels, orientation=orientation, format=format)))
+                          min_pixels=min_pixels, orientation=orientation, format=format,
+                          image_vector=image_vector or '')))
     with request('/prefetch', data=json.dumps(result['items'][:24]).encode()):
         pass
     return result

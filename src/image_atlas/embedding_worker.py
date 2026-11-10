@@ -30,6 +30,8 @@ def main():
             elif request["operation"] == "text":
                 vector = encoder.text(request["value"])
                 output = {"embedding": vector}
+            elif request['operation'] == 'reference-image':
+                output = {'embedding': encoder.reference_image(Path(request['value']))}
             else:
                 raise ValueError("Unknown embedding operation")
         except Exception as exc:  # noqa: BLE001 - return errors over the worker protocol

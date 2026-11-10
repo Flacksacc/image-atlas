@@ -23,6 +23,53 @@ fn app()->(Viewer,egui::Context){
     assert_eq!(app.photos[app.selected.unwrap()].id,51);assert!(app.preview_photo.is_none());
 }
 
+#[test]
+fn dropped_reference_search_uses_an_image_vector_and_ignores_stale_replies() {
+    for theme in [egui::Theme::Dark, egui::Theme::Light] {
+        for width in [640.0, 1200.0] {
+            let (mut app, ctx) = app(); ctx.set_theme(theme);
+            let path = std::env::temp_dir().join(format!("imageatlas-reference-{}-{width}-{theme:?}.png", std::process::id()));
+            std::fs::write(&path, b"reference fixture").unwrap();
+            let (tx, requests) = crossbeam_channel::unbounded(); app.model_tx = tx;
+            let (tx, database) = crossbeam_channel::unbounded(); app.db_tx = tx;
+            let dropped = egui::DroppedFile { path: Some(path.clone()), ..Default::default() };
+            let _ = ctx.run_ui(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 800.0))),
+                dropped_files: vec![dropped], ..Default::default()
+            }, |ui| app.images_ui(ui));
+            assert!(matches!(requests.try_recv().unwrap(), model::Request::EncodeImage { generation, path: selected }
+                if generation == app.generation && selected == path.canonicalize().unwrap()));
+            assert_eq!(app.sort.primary, SortKey::Relevance);
+            assert!(app.search.is_empty());
+            database.try_iter().for_each(drop);
+            let (tx, rx) = crossbeam_channel::unbounded(); app.model_rx = rx;
+            let mut vector = vec![0.0; 512]; vector[0] = 1.0;
+            tx.send(model::Event::Vector { generation: app.generation, vector: vector.clone() }).unwrap();
+            app.receive(&ctx);
+            assert!(database.try_iter().any(|request| matches!(request, db::Request::Explore(request)
+                if request.query.is_empty() && request.source_image_id.is_none() && request.vector == Some(vector.clone()))));
+            let old_generation = app.generation;
+            app.reference_action(image_search::Action::Clear);
+            tx.send(model::Event::Error { generation: old_generation, error: "Stale error".into() }).unwrap();
+            tx.send(model::Event::Vector { generation: old_generation, vector }).unwrap();
+            app.receive(&ctx);
+            assert!(app.cached_vector.is_none() && app.image_search.path.is_none() && app.model_error.is_none());
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+}
+
+#[test]
+fn saved_reference_queries_remain_compatible_with_older_saved_views() {
+    let (mut app, _) = app();
+    app.image_search.path = Some(PathBuf::from("reference.png"));
+    let saved = app.saved_state();
+    app.image_search.path = None; app.restore_state(saved.clone());
+    assert_eq!(app.image_search.path, Some(PathBuf::from("reference.png")));
+    let mut old = saved; old.as_object_mut().unwrap().remove("reference_image");
+    app.restore_state(old); assert!(app.image_search.path.is_none());
+}
+
 #[test] fn failed_decode_requires_explicit_retry(){
     let(mut app,ctx)=app();let(done,rx)=crossbeam_channel::unbounded();app.decode_rx=rx;
     done.send(decode::Decoded{id:1,revision:None,full:true,face:false,image:Err("Unreadable source".into())}).unwrap();app.receive(&ctx);

@@ -68,10 +68,11 @@ def create_app(catalog, *, cpu=False, encoder_factory=None):
 
     @app.get('/v1/session')
     def session():
+        from .embeddings import MODEL_ID
         with readonly(catalog) as conn:
             count = conn.execute('SELECT count(*) n FROM images').fetchone()['n']
         return dict(catalog_id=catalog.id, name=catalog.name, images=count,
-                    preview_version=VERSION, encoder_device=device)
+                    preview_version=VERSION, encoder_device=device, image_search_model=MODEL_ID)
 
     def query_vector(q):
         nonlocal encoder, device
@@ -92,10 +93,20 @@ def create_app(catalog, *, cpu=False, encoder_factory=None):
     @app.get('/v1/images')
     def search(q: str = Query('', max_length=1000), mode: str = 'combined',
                limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
-               min_pixels: int = Query(0, ge=0), orientation: str = 'any', format: str = ''):
+               min_pixels: int = Query(0, ge=0), orientation: str = 'any', format: str = '',
+               image_vector: str = Query('', max_length=16000)):
         if mode not in {'text', 'visual', 'combined'} or orientation not in {'any', 'landscape', 'portrait', 'square'}:
             raise HTTPException(400, 'Invalid search mode or orientation')
-        vector = query_vector(q) if q.strip() and mode != 'text' else None
+        if image_vector:
+            from .image_query import validate_vector
+            from .db import vector_literal
+            try:
+                vector = vector_literal(validate_vector(json.loads(image_vector)))
+            except (ValueError, TypeError):
+                raise HTTPException(400, 'Invalid image search vector') from None
+            mode, q = 'visual', 'reference image'
+        else:
+            vector = query_vector(q) if q.strip() and mode != 'text' else None
         from .embeddings import MODEL_ID
         # Token matching handles folders and collections with spaces; visual matching supplies semantics.
         tokens = q.casefold().replace("'", '').replace('’', '').split()

@@ -12,7 +12,15 @@ def main():
     action = sys.argv[1]
     if action == 'search':
         args = json.loads(sys.stdin.readline())
-        print(json.dumps(remote.search(**args), default=str))
+        path = args.pop('image_path', None)
+        vector = args.get('image_vector')
+        if path:
+            from .image_query import encode_reference
+            vector = args['image_vector'] = encode_reference(path)
+        result = remote.search(**args)
+        if vector is not None:
+            result['reference_vector'] = vector
+        print(json.dumps(result, default=str))
     elif action in {'thumb', 'preview'}:
         with remote.request(f'/v1/images/{int(sys.argv[2])}/{action}') as response:
             data = response.read(16*1024*1024+1)

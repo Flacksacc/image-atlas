@@ -23,6 +23,7 @@ chrono = "0.4"
 kamadak-exif = "0.6"
 postgres-native-tls = "0.5.3"
 native-tls = "0.2.18"
+rfd = "0.17"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_Security"] }

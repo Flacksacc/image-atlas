@@ -286,7 +286,7 @@ const HITS: &str = "WITH visual_hits AS MATERIALIZED (\
       WHERE $1::text <> '' AND m.source<>'excluded' AND c.status<>'dismissed' AND coalesce(c.user_name,c.suggested_name) ILIKE $1 ESCAPE '!'), \
   hits AS MATERIALIZED (\
     SELECT i.id, false AS text_hit, NULL::float8 AS distance FROM images i \
-      WHERE $1::text = '' AND $8::bigint IS NULL AND ($2 OR NOT i.missing) \
+      WHERE $1::text = '' AND $6::text IS NULL AND $8::bigint IS NULL AND ($2 OR NOT i.missing) \
         AND ($3::text IS NULL OR i.path LIKE $3 ESCAPE '!') \
         AND ($4::text IS NULL OR i.capture_day >= $4::text::date) \
         AND ($5::text IS NULL OR i.capture_day <= $5::text::date) \
@@ -501,6 +501,7 @@ pub fn run(
         Some(client.query_opt("SELECT embedding::text FROM images WHERE id=$1 AND embedding IS NOT NULL AND embedding_model='open_clip:ViT-B-32:laion2b_s34b_b79k'", &[&id])?
             .ok_or_else(|| anyhow::anyhow!("Image #{id} has no compatible visual embedding; its embedding needs to be rebuilt with the current model"))?.get(0))
     } else { None };
+    let has_vector = vector.is_some();
     let mut values: Vec<Box<dyn ToSql + Sync>> = vec![
         Box::new(pattern), Box::new(request.show_missing), Box::new(folder_pattern),
         Box::new(request.from_day), Box::new(request.to_day), Box::new(vector),
@@ -515,7 +516,7 @@ pub fn run(
     let base_params = values.len();
     let visual_order = if request.phase >= 2 { String::new() }
         else { "ORDER BY i.embedding <=> $6::text::halfvec LIMIT 1000".into() };
-    let hits = if query.is_empty() && request.source_image_id.is_none() {
+    let hits = if query.is_empty() && request.source_image_id.is_none() && !has_vector {
         "WITH ranked AS (SELECT id,false AS text_hit,NULL::float8 AS distance FROM images \
          WHERE $1::text='' AND $6::text IS NULL AND $7::float8>=0 AND $8::bigint IS NULL) ".to_owned()
     } else {
@@ -775,6 +776,36 @@ mod tests {
         client.execute("DELETE FROM face_groups WHERE id=$1",&[&group])?;
         client.execute("DELETE FROM people WHERE id=$1",&[&person])?;
         result
+    }
+
+    #[test]
+    fn reference_vector_without_text_returns_only_similar_images() -> anyhow::Result<()> {
+        let Ok(dsn) = std::env::var("IMAGE_CLI_TEST_DSN") else { return Ok(()); };
+        let mut client = Client::connect(&dsn, NoTls)?;
+        let root = format!("reference-search-{}",std::process::id());
+        let mut ids = Vec::new();
+        for (index, first) in [1.0_f32,0.8].into_iter().enumerate() {
+            let mut vector=vec![0.0_f32;512];vector[0]=first;vector[1]=(1.0-first*first).sqrt();
+            let value=format!("[{}]",vector.iter().map(f32::to_string).collect::<Vec<_>>().join(","));
+            ids.push(client.query_one("INSERT INTO images(path,root_path,size_bytes,mtime_ns,embedding,embedding_model) VALUES ($1,$2,1,1,$3::text::halfvec,'open_clip:ViT-B-32:laion2b_s34b_b79k') RETURNING id",&[&format!("{root}/{index}.png"),&root,&value])?.get::<_,i64>(0));
+        }
+        let result=(|| -> anyhow::Result<()> {
+            for phase in [1,2] {
+                let (tx,rx)=unbounded();let mut vector=vec![0.0;512];vector[0]=1.0;
+                run(&mut client,Request {
+                    generation:9,phase,query:String::new(),folder:None,from_day:None,to_day:None,
+                    vector:Some(vector),source_image_id:None,show_missing:false,offset:0,cursor:None,
+                    include_facets:true,relevance:0.9,filters:vec![super::FilterChip{field:"root".into(),value:root.clone(),exclude:false}],
+                    sort:super::SortSpec::default(),need_unique:false,need_geo:false,need_scatter:false,need_folder_month:false,
+                    page_limit:200,heatmap_year:2026,duplicate_stacks:false,
+                },&tx,&AtomicU64::new(9))?;
+                let events:Vec<_>=rx.try_iter().collect();
+                assert!(events.iter().any(|event|matches!(event,Event::ExplorePage{photos,..} if photos.len()==1&&photos[0].id==ids[0])));
+                assert!(events.iter().any(|event|matches!(event,Event::ExploreFacets{total,..} if *total==1)));
+            }
+            Ok(())
+        })();
+        client.execute("DELETE FROM images WHERE id=ANY($1)",&[&ids])?;result
     }
 
     #[test]

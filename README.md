@@ -112,6 +112,19 @@ image-atlas semantic-search "red car at night"
 
 By default, `mine` runs metadata collection, visual embeddings, suggested content labels, and face analysis. For CPU processing, add `--cpu`. People and content labels are suggestions to review, and OCR is currently disabled.
 
+### Search with an image
+
+Click **Search by image…** or drop an image into the desktop viewer or browser gallery to find similar pictures. The reference does not need to be in the catalog. Results use the catalog's existing OpenCLIP embeddings and are ranked by visual similarity; the reference is not indexed or modified. Use **Clear image search** to return to ordinary browsing. The desktop viewer also offers a relevance cutoff.
+
+Install the vision dependencies above and run mining with embeddings enabled before searching. Reference files can be up to 32 MiB and 40 megapixels; JPEG, PNG, and WebP are good starting formats. The browser gallery processes uploads temporarily on its own server and deletes them after the query. The native remote viewer computes the reference vector on the client and sends only that vector; both client and remote server must support this feature. Remote paging reuses the vector.
+
+The command-line equivalent is:
+
+```powershell
+image-atlas image-search "D:\Reference Images\example.jpg" --limit 30
+image-atlas image-search "D:\Reference Images\example.jpg" --cpu
+```
+
 ## Everyday commands
 
 | Task | Command |
