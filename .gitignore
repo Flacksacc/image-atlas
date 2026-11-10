@@ -23,3 +23,5 @@ audit/
 .embedding-sample.png
 .tmp/
 viewer/target/
+/build/
+/dist/

@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 default-run = "image-atlas-viewer"
 
+[build-dependencies]
+winresource = "0.1"
+
 [[bin]]
 name = "image-atlas-viewer-updated"
 path = "src/updated.rs"

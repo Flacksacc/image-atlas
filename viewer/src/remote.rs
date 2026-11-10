@@ -142,7 +142,8 @@ impl RemoteViewer {
             }
             ctx.request_repaint_after(Duration::from_millis(100));
         }
-        ui.heading("Remote images");
+        ui.horizontal_wrapped(|ui|{ui.heading("Remote images");crate::branding::about_button(ui);});
+        crate::branding::about_ui(&ctx);
         let mut submit=false;
         ui.horizontal_wrapped(|ui|{
             let edit=ui.add(egui::TextEdit::singleline(&mut self.query).hint_text("Search images").desired_width(360.));
@@ -234,7 +235,7 @@ impl RemoteViewer {
 pub fn run()->eframe::Result{
     #[allow(unused_mut)] let mut size=[1200.,800.];
     #[cfg(debug_assertions)]{if let(Ok(w),Ok(h))=(std::env::var("IMAGE_CLI_QA_WIDTH"),std::env::var("IMAGE_CLI_QA_HEIGHT")){size=[w.parse().unwrap_or(1200.),h.parse().unwrap_or(800.)];}}
-    eframe::run_native("Remote ImageAtlas",eframe::NativeOptions{viewport:egui::ViewportBuilder::default().with_inner_size(size),..Default::default()},Box::new(|cc|Ok(Box::new(RemoteViewer::new(cc.egui_ctx.clone())))))
+    eframe::run_native("Remote ImageAtlas",eframe::NativeOptions{viewport:egui::ViewportBuilder::default().with_inner_size(size).with_icon(crate::branding::icon()),..Default::default()},Box::new(|cc|Ok(Box::new(RemoteViewer::new(cc.egui_ctx.clone())))))
 }
 
 impl eframe::App for RemoteViewer {

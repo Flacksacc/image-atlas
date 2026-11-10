@@ -81,6 +81,7 @@ impl Picker {
                 }).response.on_hover_text("Switch image and asset databases in this window");
             if ui.add_enabled(!self.listing,egui::Button::new("Refresh databases")).clicked(){self.refresh(ui.ctx());}
             if ui.button("Database details").on_hover_text("Edit this database's display name, description and notes; inspect size and tables").clicked(){self.details_requested=true;}
+            crate::branding::about_button(ui);
             if self.loading {ui.spinner();ui.label("Opening database…");}
             else if self.listing {ui.spinner();ui.label("Loading databases…");}
         });
@@ -184,6 +185,7 @@ impl Window {
             } else if let Some(images)=&mut self.images {images.draw(ui);}
         });
         self.editor.ui(ui.ctx());
+        crate::branding::about_ui(ui.ctx());
         if let Some(assets)=&mut self.assets {assets.loading_dialog(ui.ctx());}
     }
 }

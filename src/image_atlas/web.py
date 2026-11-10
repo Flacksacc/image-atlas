@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from PIL import Image, ImageOps
 from pydantic import BaseModel
 
+from . import __version__
 from .db import connect
 from .faces import name_group
 from .gallery_sort import GROUP_FIELDS, SORT_FIELDS, oriented_sql
@@ -142,7 +143,7 @@ def catalog_manage(request: CatalogOperation):
         current.reset(token)
 
 HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ImageAtlas</title><style>
+<title>ImageAtlas</title><link rel="icon" href="/icon.ico"><style>
 body{margin:0;background:#101820;color:#e9eef2;font:16px system-ui}header{padding:20px 28px;background:#17242d;position:sticky;top:0;z-index:1}
 h1{margin:0 0 12px;font-size:24px}nav button,button{background:#2688a0;color:#fff;border:0;border-radius:5px;padding:9px 13px;cursor:pointer}
 nav button{margin-right:8px}input{padding:9px;border:1px solid #63717a;border-radius:5px;background:#fff;color:#111;min-width:210px}
@@ -150,8 +151,10 @@ select{padding:8px;border-radius:5px;max-width:100%}.toolbar{display:flex;flex-w
 main{padding:20px 28px}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px}.card{background:#1c2b35;border-radius:8px;padding:10px;overflow:hidden}
 .card input,.card select,.card textarea{max-width:100%;box-sizing:border-box;min-width:0}.card input:not([type=checkbox]),.card select{width:100%}.card h3{overflow-wrap:anywhere}.card img{display:block;width:160px;max-width:100%;height:160px;object-fit:contain;background:#0a1117;margin:0 auto 8px}.card small{display:block;word-break:break-all;color:#b9c6cd;margin:6px 0}
 .group img{width:120px;height:120px;object-fit:cover} .faces{display:flex;flex-wrap:wrap;gap:6px}.hint{color:#9fb3bf}pre{white-space:pre-wrap;word-break:break-word}
-</style></head><body><header><h1>ImageAtlas</h1><nav><button title="Review, sort, and group indexed images" onclick="loadImages()">Images</button><button title="Review face samples and assign or ignore person identities" onclick="loadGroups()">People</button><button title="Review suggested file destinations without moving originals" onclick="loadProposals()">Sort proposals</button></nav>
+header h1{display:flex;align-items:center;gap:10px}dialog{max-width:min(360px,85vw);max-height:85vh;overflow:auto;text-align:center;background:#17242d;color:#e9eef2;border:1px solid #63717a;border-radius:12px;padding:24px}dialog img{display:block;margin:auto}dialog a{color:#8ddded}dialog::backdrop{background:#0009}
+</style></head><body><header><h1><img src="/logo.png" alt="" width="42" height="42"> ImageAtlas</h1><nav><button title="Review, sort, and group indexed images" onclick="loadImages()">Images</button><button title="Review face samples and assign or ignore person identities" onclick="loadGroups()">People</button><button title="Review suggested file destinations without moving originals" onclick="loadProposals()">Sort proposals</button><button onclick="document.getElementById('about-dialog').showModal()">About ImageAtlas</button></nav>
 <p><input id="query" placeholder="Search filename"><button onclick="loadImages()">Search</button> <label><input id="show-missing" type="checkbox" onchange="loadImages()"> Show missing files</label></p><div id="sort-tools"></div></header><main id="main"></main>
+<dialog id="about-dialog" aria-labelledby="about-title"><img src="/logo.png" alt="ImageAtlas globe made of photographs" width="160" height="160"><h2 id="about-title">ImageAtlas</h2><p>Version __IMAGEATLAS_VERSION__</p><p>Find, explore, and organize your image library.</p><p><a href="https://github.com/Flacksacc/image-atlas">GitHub repository</a></p><form method="dialog"><button>Close</button></form></dialog>
 <script>
 const main=document.getElementById('main');const escapeHtml=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function get(path){let r=await fetch(path);if(!r.ok)throw Error(await responseError(r));return r.json()}
@@ -184,7 +187,7 @@ def home():
     from .catalogs import registry
     initial_catalog = getattr(app.state, 'initial_catalog_id', None) or registry()['default']
     bootstrap = '<script>const CATALOG_DEFAULT=' + json.dumps(initial_catalog) + ';</script><script src="/catalogs.js"></script>'
-    return HTML.replace('<script>', bootstrap + '<script>', 1).replace('src="/api/', 'src="\'+catalogPrefix+\'/').replace('</nav>', '<button title="Browse and edit events, trips, and places" onclick="loadCollections()">Collections</button><select id="catalog-selector" title="Catalog for this tab"></select><button title="Create, register, switch, inspect, back up, and restore databases" onclick="manageCatalogs()">Databases</button></nav>').replace(
+    return HTML.replace('__IMAGEATLAS_VERSION__', __version__).replace('<script>', bootstrap + '<script>', 1).replace('src="/api/', 'src="\'+catalogPrefix+\'/').replace('</nav>', '<button title="Browse and edit events, trips, and places" onclick="loadCollections()">Collections</button><select id="catalog-selector" title="Catalog for this tab"></select><button title="Create, register, switch, inspect, back up, and restore databases" onclick="manageCatalogs()">Databases</button></nav>').replace(
         'loadImages().catch', "groupOptions.push(['Event','Event'],['Trip','Trip'],['Place','Place']);for(let k of ['Event','Trip','Place'])groupHints[k]='Group by saved '+k.toLowerCase()+' collections; an image appears once.';loadImages().catch").replace(
         '</body>', '<script src="/collections.js"></script></body>')
 
@@ -192,6 +195,18 @@ def home():
 @app.get('/catalogs.js')
 def catalogs_script():
     return Response(Path(__file__).with_name('web_catalogs.js').read_text(encoding='utf-8'), media_type='text/javascript')
+
+
+@app.get('/logo.png')
+def logo_image():
+    return Response((Path(__file__).with_name('branding') / 'image-atlas.png').read_bytes(),
+                    media_type='image/png')
+
+
+@app.get('/icon.ico')
+def application_icon():
+    return Response((Path(__file__).with_name('branding') / 'image-atlas.ico').read_bytes(),
+                    media_type='image/vnd.microsoft.icon')
 
 
 @app.get('/api/check')

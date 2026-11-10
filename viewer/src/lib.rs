@@ -15,6 +15,7 @@ mod asset_metadata;
 mod catalog_switcher;
 mod database_details;
 mod remote;
+mod branding;
 
 use chrono::{Datelike, Local, Months, NaiveDate};
 use crossbeam_channel::{Receiver, Sender};
@@ -371,7 +372,7 @@ fn install_fonts(ctx:&egui::Context) {
 pub fn run()->eframe::Result {
     if std::env::var("IMAGE_CLI_REMOTE").as_deref()==Ok("1"){return remote::run();}
     #[allow(unused_mut)]
-    let mut viewport=egui::ViewportBuilder::default().with_inner_size([1200.0,800.0]);
+    let mut viewport=egui::ViewportBuilder::default().with_inner_size([1200.0,800.0]).with_icon(branding::icon());
     #[cfg(debug_assertions)] if std::env::var_os("IMAGE_CLI_VIEWER_SCREENSHOT").is_some(){viewport=viewport.with_active(false);}
     #[cfg(debug_assertions)] if let (Ok(width),Ok(height))=(std::env::var("IMAGE_CLI_QA_WIDTH"),std::env::var("IMAGE_CLI_QA_HEIGHT")){if let (Ok(width),Ok(height))=(width.parse::<f32>(),height.parse::<f32>()){viewport=viewport.with_inner_size([width,height]);}}
     eframe::run_native("ImageAtlas",eframe::NativeOptions{

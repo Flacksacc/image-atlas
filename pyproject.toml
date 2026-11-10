@@ -31,11 +31,14 @@ test = ["pytest>=8", "httpx>=0.28"]
 image-atlas = "image_atlas.cli:app"
 image-cli = "image_atlas.cli:app"
 
+[project.gui-scripts]
+image-atlas-viewer = "image_atlas.launcher:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-image_atlas = ["*.js"]
+image_atlas = ["*.js", "branding/*.png", "branding/*.ico"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

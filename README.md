@@ -1,5 +1,9 @@
 # ImageAtlas
 
+<p align="center">
+  <img src="src/image_atlas/branding/image-atlas.png" alt="ImageAtlas globe made of photographs" width="220">
+</p>
+
 **Find, browse, and organize your image library while keeping the original files in place.**
 
 ImageAtlas builds a local, searchable catalog of your photos and artwork. Use a desktop viewer, a browser gallery, or the command line to find images, review faces, explore events and trips, and identify duplicates.
@@ -83,6 +87,14 @@ For the desktop viewer, build it once, then launch it:
 cargo build --release --manifest-path viewer/Cargo.toml
 image-atlas view
 ```
+
+To add ImageAtlas to your Windows Start menu with its globe icon, run:
+
+```powershell
+.\scripts\install_shortcuts.ps1
+```
+
+The desktop viewer's **About ImageAtlas** button shows the logo, version, and project link.
 
 Use the viewer's search, filters, and sorting controls to explore your catalog. Ratings, tags, and people edits affect catalog data. Opening an original in another editor lets that application access the source file.
 
