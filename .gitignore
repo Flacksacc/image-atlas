@@ -1,0 +1,25 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+.tools/
+.models/
+*.egg-info/
+.pytest-*/
+.pytest_tmp/
+.ruff_cache/
+# Local QA reports, screenshots, fixture databases, and runtime configuration.
+audit/
+# Database backup archives belong outside the source repository.
+*.dump
+.ocr-sample.png
+.embedding-sample.png
+.tmp/
+viewer/target/

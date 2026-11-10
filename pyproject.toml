@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "image-atlas"
+version = "0.1.0"
+description = "Local image inventory, visual search, face review, and sorting proposals"
+requires-python = ">=3.12"
+dependencies = [
+  "Pillow>=11,<13",
+  "pillow-heif>=1,<2",
+  "psycopg[binary]>=3.2,<4",
+  "typer>=0.15,<1",
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.34,<1",
+  "numpy>=2,<3",
+  "psutil>=6,<8",
+  "cryptography>=43",
+  "imagecodecs==2026.10.10",
+  "python-dotenv>=1,<2",
+]
+
+[project.optional-dependencies]
+vision = ["torch>=2.6", "open-clip-torch>=2.26", "opencv-contrib-python>=4.10"]
+raw = ["rawpy"]
+adobe = ["psd-tools[composite]>=1.10,<2", "pypdfium2>=4.30,<6"]
+test = ["pytest>=8", "httpx>=0.28"]
+
+[project.scripts]
+image-atlas = "image_atlas.cli:app"
+image-cli = "image_atlas.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+image_atlas = ["*.js"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

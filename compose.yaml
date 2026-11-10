@@ -1,0 +1,17 @@
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: imagecli
+      POSTGRES_PASSWORD: ${IMAGEATLAS_DB_PASSWORD:?Run python scripts/setup_local.py first}
+      POSTGRES_DB: imagecli
+    ports:
+      - "127.0.0.1:54329:5432"
+    volumes:
+      - imagecli-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U imagecli -d imagecli"]
+      interval: 3s
+      retries: 20
+volumes:
+  imagecli-pg:

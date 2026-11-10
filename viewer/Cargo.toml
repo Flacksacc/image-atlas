@@ -1,0 +1,29 @@
+[package]
+name = "image-atlas-viewer"
+version = "0.1.0"
+edition = "2024"
+default-run = "image-atlas-viewer"
+
+[[bin]]
+name = "image-atlas-viewer-updated"
+path = "src/updated.rs"
+
+[dependencies]
+eframe = { version = "=0.35.0", default-features = false, features = ["wgpu", "default_fonts"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "tiff", "bmp", "gif"] }
+postgres = "0.19"
+crossbeam-channel = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+chrono = "0.4"
+kamadak-exif = "0.6"
+postgres-native-tls = "0.5.3"
+native-tls = "0.2.18"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_Security"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 8
