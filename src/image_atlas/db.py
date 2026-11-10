@@ -74,6 +74,12 @@ ALTER TABLE images ADD COLUMN IF NOT EXISTS last_viewed_at timestamptz;
 ALTER TABLE images ADD COLUMN IF NOT EXISTS labels_status text NOT NULL DEFAULT 'pending';
 ALTER TABLE images ADD COLUMN IF NOT EXISTS labels_version smallint NOT NULL DEFAULT 0;
 ALTER TABLE images ADD COLUMN IF NOT EXISTS embedding_error text;
+ALTER TABLE images ADD COLUMN IF NOT EXISTS gemma_embedding halfvec(512);
+ALTER TABLE images ADD COLUMN IF NOT EXISTS gemma_embedding_model text;
+ALTER TABLE images ADD COLUMN IF NOT EXISTS gemma_embedding_status text NOT NULL DEFAULT 'pending';
+ALTER TABLE images ADD COLUMN IF NOT EXISTS gemma_embedding_error text;
+UPDATE images SET gemma_embedding_status='skipped',gemma_embedding_error=embedding_error
+ WHERE embedding_status='skipped' AND gemma_embedding_status='pending';
 ALTER TABLE images ADD COLUMN IF NOT EXISTS face_error text;
 ALTER TABLE images ADD COLUMN IF NOT EXISTS folder_path text;
 ALTER TABLE images ADD COLUMN IF NOT EXISTS capture_day date;
@@ -93,6 +99,7 @@ CREATE INDEX IF NOT EXISTS images_favorite_idx ON images(id) WHERE favorite;
 CREATE INDEX IF NOT EXISTS images_gps_idx ON images(gps_lat,gps_lon) WHERE gps_lat IS NOT NULL;
 CREATE INDEX IF NOT EXISTS images_filename_sort_idx ON images(filename_sort,id);
 CREATE INDEX IF NOT EXISTS images_embedding_idx ON images USING hnsw (embedding halfvec_cosine_ops) WHERE embedding IS NOT NULL;
+CREATE INDEX IF NOT EXISTS images_gemma_embedding_idx ON images USING hnsw (gemma_embedding halfvec_cosine_ops) WHERE gemma_embedding IS NOT NULL;
 CREATE TABLE IF NOT EXISTS image_search (
  image_id bigint PRIMARY KEY REFERENCES images(id) ON DELETE CASCADE,
  search_text text NOT NULL
@@ -272,6 +279,7 @@ CREATE TRIGGER people_collections_stale AFTER UPDATE OF ignored ON people
 CREATE TABLE IF NOT EXISTS catalog_migrations (version integer PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now());
 INSERT INTO catalog_migrations(version) VALUES (2) ON CONFLICT DO NOTHING;
 INSERT INTO catalog_migrations(version) VALUES (3) ON CONFLICT DO NOTHING;
+INSERT INTO catalog_migrations(version) VALUES (4) ON CONFLICT DO NOTHING;
 
 """
 
@@ -305,7 +313,7 @@ def initialize():
             conn.execute(SCHEMA)
         else:
             table = conn.execute("SELECT to_regclass('public.catalog_migrations') AS name").fetchone()['name']
-            if table is None or conn.execute('SELECT count(*) n FROM catalog_migrations WHERE version IN (2,3)').fetchone()['n'] != 2:
+            if table is None or conn.execute('SELECT count(*) n FROM catalog_migrations WHERE version IN (2,3,4)').fetchone()['n'] != 3:
                 conn.execute(SCHEMA)
 
 
@@ -321,7 +329,7 @@ def pending_images(conn, column: str, *, limit: int | None = None, retry_errors:
                    root_path: str | None = None, image_ids: list[int] | None = None,
                    selected_table: bool = False):
     """Walk a large backlog with keyset pagination while callers commit each result."""
-    if column not in {"embedding_status", "face_status"}:
+    if column not in {"embedding_status", "gemma_embedding_status", "face_status"}:
         raise ValueError("Unknown status column")
     last_id = 0
     count = 0

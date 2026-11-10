@@ -38,7 +38,7 @@ def open_reference(path):
 
 def validate_vector(values):
     if not isinstance(values, (list, tuple)) or len(values) != 512:
-        raise ValueError('An image search needs a 512-dimensional OpenCLIP vector')
+        raise ValueError('An image search needs a 512-dimensional vector')
     if any(isinstance(value, bool) or not isinstance(value, (int, float))
            or not math.isfinite(value) or abs(value) > 1.0001 for value in values):
         raise ValueError('Invalid image search vector')
@@ -47,12 +47,12 @@ def validate_vector(values):
     return [float(value) for value in values]
 
 
-def encode_reference(path, *, cpu=False):
+def encode_reference(path, *, cpu=False, model='openclip'):
     # Validate and decode before loading a model, so invalid inputs fail promptly.
     with open_reference(path):
         pass
     from .embeddings import create_embedder
-    encoder = create_embedder(cpu=cpu)
+    encoder = create_embedder(cpu=cpu, model=model)
     try:
         return validate_vector(encoder.reference_image(Path(path)))
     finally:
@@ -60,15 +60,16 @@ def encode_reference(path, *, cpu=False):
             encoder.close()
 
 
-def search(conn, vector, *, limit=100, offset=0, include_missing=False):
+def search(conn, vector, *, limit=100, offset=0, include_missing=False, model='openclip'):
     from .db import vector_literal
-    from .embeddings import MODEL_ID
+    from .embedding_models import get_model, model_sql
+    spec = get_model(model)
     if not 1 <= limit <= 500 or offset < 0:
         raise ValueError('Use a limit from 1 to 500 and a nonnegative offset')
     value = vector_literal(validate_vector(vector))
-    return conn.execute('''SELECT id,path,sha256,width,height,format,size_bytes,
+    return conn.execute(model_sql('''SELECT id,path,sha256,width,height,format,size_bytes,
         capture_day,capture_at,camera_model,rating,review_state,
         1-(embedding <=> %s::halfvec) AS similarity,count(*) OVER() AS total
         FROM images WHERE (%s OR NOT missing) AND embedding IS NOT NULL AND embedding_model=%s
-        ORDER BY embedding <=> %s::halfvec,id LIMIT %s OFFSET %s''',
-        (value, include_missing, MODEL_ID, value, limit, offset)).fetchall()
+        ORDER BY embedding <=> %s::halfvec,id LIMIT %s OFFSET %s''', spec),
+        (value, include_missing, spec.id, value, limit, offset)).fetchall()

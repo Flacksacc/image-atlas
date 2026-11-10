@@ -22,7 +22,7 @@ def _group_for(conn, embedding):
 
 def process_pending(conn, *, limit: int | None = None, retry_errors: bool = False,
                     root_path: str | None = None, image_ids: list[int] | None = None, progress=None,
-                    selected_table: bool = False, check=None, counts=None, job=None):
+                    selected_table: bool = False, check=None, counts=None, job=None, runtime=None):
     engine = None
     check = check or (lambda: None)
     result = counts if counts is not None else {}
@@ -40,6 +40,9 @@ def process_pending(conn, *, limit: int | None = None, retry_errors: bool = Fals
                 job.update(stage='faces', image_id=row['id'], path=row['path'], images_completed=result['images'])
             if engine is None:
                 engine = FaceEngine(check=check) if FaceEngine is FaceWorkerClient else FaceEngine()
+                if runtime is not None:
+                    runtime(model='YuNet + SFace', model_id='opencv:yunet-2023mar:sface-2021dec',
+                            device=str(getattr(engine, 'device', 'unknown')))
             try:
                 detections = list(engine.detect(Path(row["path"])))
                 check()

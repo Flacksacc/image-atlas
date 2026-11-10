@@ -1,5 +1,29 @@
 use super::*;
 
+#[test]
+fn switching_models_discards_old_vectors_and_persists_the_selected_model() {
+    let (mut app, ctx) = app();
+    let (tx, requests) = crossbeam_channel::unbounded(); app.model_tx = tx;
+    let (tx, database) = crossbeam_channel::unbounded(); app.db_tx = tx;
+    app.search = "red car".into();
+    app.cached_vector = Some((app.query_key(), vec![0.1;512]));
+    let old_generation = app.generation;
+    app.embedding_model = embedding_models::EmbeddingModel::EmbeddingGemma2;
+    app.submit_search();
+    assert!(app.cached_vector.is_none());
+    assert!(matches!(requests.try_recv().unwrap(), model::Request::Encode { model:embedding_models::EmbeddingModel::EmbeddingGemma2, .. }));
+    assert!(database.try_iter().any(|request|matches!(request,db::Request::Explore(request) if request.model==embedding_models::EmbeddingModel::EmbeddingGemma2 && request.vector.is_none())));
+    let (tx, rx) = crossbeam_channel::unbounded(); app.model_rx = rx;
+    tx.send(model::Event::Ready { generation:old_generation }).unwrap();
+    tx.send(model::Event::Vector { generation:old_generation,vector:vec![0.1;512] }).unwrap();
+    app.receive(&ctx);
+    assert!(app.cached_vector.is_none() && !app.model_ready);
+    let state=app.saved_state();
+    app.embedding_model=embedding_models::EmbeddingModel::OpenClip;
+    app.restore_state(state);
+    assert_eq!(app.embedding_model,embedding_models::EmbeddingModel::EmbeddingGemma2);
+}
+
 fn app()->(Viewer,egui::Context){
     let ctx=egui::Context::default();
     let(tx,_)=crossbeam_channel::unbounded();let(_,rx)=crossbeam_channel::unbounded();
@@ -37,7 +61,7 @@ fn dropped_reference_search_uses_an_image_vector_and_ignores_stale_replies() {
                 screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 800.0))),
                 dropped_files: vec![dropped], ..Default::default()
             }, |ui| app.images_ui(ui));
-            assert!(matches!(requests.try_recv().unwrap(), model::Request::EncodeImage { generation, path: selected }
+            assert!(matches!(requests.try_recv().unwrap(), model::Request::EncodeImage { generation, path: selected, .. }
                 if generation == app.generation && selected == path.canonicalize().unwrap()));
             assert_eq!(app.sort.primary, SortKey::Relevance);
             assert!(app.search.is_empty());

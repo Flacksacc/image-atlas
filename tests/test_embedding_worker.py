@@ -59,13 +59,13 @@ def test_worker_preflight_and_bad_image_isolation(monkeypatch):
             return [1.0]+[0.0]*511
         def text(self,value):return [1.0]+[0.0]*511
         def close(self):pass
-    monkeypatch.setattr(embedding_worker,'Embedder',FakeEncoder)
+    monkeypatch.setattr(embedding_worker,'local_embedder',FakeEncoder)
     requests=[{'operation':'check','value':''},{'operation':'image','value':'bad.jpg'},
               {'operation':'image','value':'good.jpg'}]
     out=io.StringIO()
     monkeypatch.setattr(embedding_worker.sys,'stdin',io.StringIO(''.join(json.dumps(r)+'\n' for r in requests)))
     monkeypatch.setattr(embedding_worker.sys,'stdout',out)
-    embedding_worker.main()
+    embedding_worker.main([])
     replies=[json.loads(line) for line in out.getvalue().splitlines()]
     assert replies[0]['ready'] is True
     assert replies[1]=={'error':'corrupt photo','fatal':False}
@@ -74,11 +74,11 @@ def test_worker_preflight_and_bad_image_isolation(monkeypatch):
 
 def test_worker_setup_failure_is_reported_once(monkeypatch):
     def broken(**kwargs):raise ModuleNotFoundError("No module named 'psycopg'")
-    monkeypatch.setattr(embedding_worker,'Embedder',broken)
+    monkeypatch.setattr(embedding_worker,'local_embedder',broken)
     out=io.StringIO()
     monkeypatch.setattr(embedding_worker.sys,'stdin',io.StringIO((json.dumps({'operation':'check','value':''})+'\n')*10))
     monkeypatch.setattr(embedding_worker.sys,'stdout',out)
-    embedding_worker.main()
+    embedding_worker.main([])
     assert [json.loads(line) for line in out.getvalue().splitlines()]==[{'error':"No module named 'psycopg'",'fatal':True}]
 
 

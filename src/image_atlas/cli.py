@@ -57,8 +57,12 @@ def emit(value, *, json_output: bool = False):
         status = 'Cancelled' if value.get('cancelled') else ('Completed with errors' if any(s.get('error') or s.get('errors') or s.get('previews_failed') for s in value['stages'].values()) else 'Completed')
         typer.echo(f'{status}: {value["root"]}')
         for name, stage in value['stages'].items():
-            counts = {k: v for k, v in stage.items() if k in {'new', 'updated', 'unchanged', 'moved', 'processed', 'images', 'faces', 'skipped_cloud', 'worker_restarts', 'error', 'previews_created', 'previews_reused', 'previews_failed', 'previews_pending', 'previews_skipped'}}
+            counts = {k: v for k, v in stage.items() if k in {'workers', 'new', 'updated', 'unchanged', 'moved', 'processed', 'images', 'faces', 'skipped_cloud', 'worker_restarts', 'error', 'previews_created', 'previews_reused', 'previews_failed', 'previews_pending', 'previews_skipped'}}
             typer.echo(f'{name.capitalize()}: ' + ', '.join(f'{k.replace("_", " ")}={v}' for k, v in counts.items()))
+            if 'gpu_used' in stage:
+                gpu = 'yes' if stage['gpu_used'] is True else ('no' if stage['gpu_used'] is False else 'unknown')
+                devices = ', '.join(stage.get('devices', [])) or stage.get('device', 'unknown')
+                typer.echo(f'  Model: {stage.get("model") or "none"}; device: {devices}; GPU used: {gpu}; {stage.get("runtime_state", "")}')
             if stage.get('errors'):
                 typer.echo(f'  {len(stage["errors"])} image errors:')
                 typer.echo('\n'.join(lines(stage['errors'], 2, max_entries=20)))
@@ -265,7 +269,9 @@ def parse_mine_tags(value: str) -> tuple[str, ...]:
 @app.command()
 def mine(root: Path, tags: str = "all", limit: int | None = None, retry_errors: bool = False,
          cpu: bool = False, prune: bool = False, json_output: bool = typer.Option(False, "--json"),
-         exclude_dir: list[Path] | None = None, include_system: bool = False):
+         exclude_dir: list[Path] | None = None, include_system: bool = False,
+         embedding_model: str = typer.Option('openclip', help='Visual index: openclip or embeddinggemma2.'),
+         workers: int = typer.Option(2, min=1, max=8, help='Concurrent CPU scan workers; use 1 for sequential scanning.')):
     """Mine a file, folder, or searcheverything: thumbnails, embeddings, and faces."""
     from . import embeddings, faces, labels
     from .cloud import unavailable_cloud_file
@@ -274,6 +280,11 @@ def mine(root: Path, tags: str = "all", limit: int | None = None, retry_errors: 
     from .jobs import MineJob, MiningCancelled
     from .progress import MiningProgress
     selected = parse_mine_tags(tags)
+    from .embedding_models import get_model
+    try:
+        spec = get_model(embedding_model)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     everything_source = str(root).lower() == "searcheverything"
     from .catalogs import resolve
     catalog = resolve()
@@ -326,7 +337,7 @@ def mine(root: Path, tags: str = "all", limit: int | None = None, retry_errors: 
                 progress.begin("find", total=limit, pictures_total=limit)
                 paths, examined, skipped_cloud = select_images_for_mine(
                     conn, Path(root_key), selected, limit, retry_errors=retry_errors,
-                    progress=examine, selected_progress=advance, candidates=candidates)
+                    progress=examine, selected_progress=advance, candidates=candidates, embedding_model=spec.key)
                 pictures_total = len(paths)
                 progress.set_total(pictures_total)
             else:
@@ -353,11 +364,12 @@ def mine(root: Path, tags: str = "all", limit: int | None = None, retry_errors: 
                 examined = discover_total
             result["pictures_examined"] = examined
             result["skipped_cloud"] = skipped_cloud
-            progress.begin("scan", pictures_total, pictures_total)
+            progress.begin("scan", pictures_total, pictures_total, runtime_state=f'{workers} scan workers')
             result["stages"]["metadata"] = {}
             result["stages"]["metadata"] = run_scan(conn, root_key, prune=prune, paths=paths,
                                                         image_ids=image_ids, progress=advance,
-                                                        virtual_source=everything_source, counts=result["stages"]["metadata"])
+                                                        virtual_source=everything_source, counts=result["stages"]["metadata"],
+                                                        workers=workers, check=job.check)
             result["stages"]["metadata"].update(progress.stage_metrics())
             result["stages"]["metadata"]["completed"] = True
             root_filter = None if everything_source else root_key
@@ -369,9 +381,18 @@ def mine(root: Path, tags: str = "all", limit: int | None = None, retry_errors: 
                 image_ids = None
             for tag in selected:
                 job.check()
+                model_name, model_id = {
+                    'embeddings': ('OpenCLIP ViT-B/32' if spec.key == 'openclip' else spec.name, spec.id),
+                    'labels': ('OpenCLIP ViT-B/32', embeddings.MODEL_ID),
+                    'faces': ('YuNet + SFace', 'opencv:yunet-2023mar:sface-2021dec'),
+                }[tag]
+                progress.begin(tag, pictures_total=pictures_total, model=model_name, model_id=model_id,
+                               device='loading', runtime_state='loading')
                 try:
                     column = {"embeddings": "embedding_status", "labels": "labels_status",
                               "faces": "face_status"}[tag]
+                    if tag == 'embeddings':
+                        column = spec.column('_status')
                     statuses = ["pending", "error"] if retry_errors else ["pending"]
                     scope = "AND EXISTS (SELECT 1 FROM mine_selected_ids s WHERE s.id=images.id)" if selected_table else ""
                     status_condition = ("(labels_status=ANY(%s) OR (labels_status='done' AND labels_version<%s))"
@@ -382,25 +403,28 @@ def mine(root: Path, tags: str = "all", limit: int | None = None, retry_errors: 
                                              {"AND embedding IS NOT NULL" if tag == "labels" else ""}
                                              AND (%s::bigint[] IS NULL OR id=ANY(%s::bigint[])) {scope}""",
                                            (root_filter, root_filter, *status_args, image_ids, image_ids)).fetchone()["n"]
-                    progress.begin(tag, pending, pictures_total)
+                    progress.set_total(pending)
                     if tag == "embeddings":
                         stage = embeddings.process_pending(conn, retry_errors=retry_errors, cpu=cpu,
                                                            root_path=root_filter, image_ids=image_ids,
-                                                           progress=advance, selected_table=selected_table)
+                                                           progress=advance, selected_table=selected_table, model=spec.key,
+                                                           runtime=progress.set_runtime)
                     elif tag == "labels":
                         stage = labels.process_pending(conn, retry_errors=retry_errors, cpu=cpu,
                                                        root_path=root_filter, image_ids=image_ids,
-                                                       progress=advance, selected_table=selected_table)
+                                                       progress=advance, selected_table=selected_table, runtime=progress.set_runtime)
                     else:
                         result['stages'][tag] = {}
                         stage = faces.process_pending(conn, retry_errors=retry_errors, root_path=root_filter,
                                                       image_ids=image_ids, progress=advance,
                                                       selected_table=selected_table, check=job.check,
-                                                      counts=result['stages'][tag], job=job)
+                                                      counts=result['stages'][tag], job=job, runtime=progress.set_runtime)
                     result["stages"][tag] = stage
+                    progress.end_runtime()
                 except Exception as exc:  # noqa: BLE001 - report failed stage, continue other stages
                     conn.rollback()
                     result["stages"].setdefault(tag, {})['error'] = str(exc)
+                    progress.end_runtime(failed=True)
                 result["stages"][tag].update(progress.stage_metrics())
         failed = any(stage.get("error") or stage.get("errors") or stage.get('previews_failed') for stage in result["stages"].values())
     except (MiningCancelled, KeyboardInterrupt):
@@ -456,6 +480,8 @@ def status():
                             count(*) FILTER (WHERE labels_status='done' AND NOT missing) AS labels_done,
                             count(*) FILTER (WHERE face_status='done' AND NOT missing) AS faces_checked
                             FROM images""").fetchone()
+        if conn.execute("SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='images' AND column_name='gemma_embedding_status') AS present").fetchone()['present']:
+            row['gemma_embeddings_done'] = conn.execute("SELECT count(*) AS n FROM images WHERE gemma_embedding_status='done' AND NOT missing").fetchone()['n']
         row["faces"] = conn.execute("SELECT count(*) AS n FROM faces").fetchone()["n"]
         thumbs = conn.execute("""SELECT count(*) AS thumbnails_stored,
                                coalesce(sum(octet_length(data)),0) AS thumbnail_bytes
@@ -543,26 +569,28 @@ def db_storage():
 
 
 @app.command(hidden=True)
-def scan(root: Path, prune: bool = False, limit: int | None = None):
+def scan(root: Path, prune: bool = False, limit: int | None = None,
+         workers: int = typer.Option(2, min=1, max=8, help='Concurrent CPU scan workers; 1 is sequential.')):
     """Index metadata and hashes. --prune marks missing paths after a complete scan."""
     from .catalogs import require_path
     require_path(root)
     from .indexer import scan as run_scan
     initialize()
     with connect() as conn:
-        emit(run_scan(conn, str(root), prune=prune, limit=limit))
+        emit(run_scan(conn, str(root), prune=prune, limit=limit, workers=workers))
 
 
 @app.command(hidden=True)
-def embed(limit: int | None = None, cpu: bool = False, retry_errors: bool = False):
+def embed(limit: int | None = None, cpu: bool = False, retry_errors: bool = False, model: str = 'openclip'):
     """Compute CLIP image vectors for semantic search."""
     from .embeddings import process_pending
     from .catalogs import resolve
     catalog = resolve()
     if not catalog.id or catalog.readonly or not catalog.roots:
         raise typer.BadParameter('Select a writable catalog with allowed folders')
+    initialize()
     with connect() as conn:
-        emit(process_pending(conn, limit=limit, cpu=cpu, retry_errors=retry_errors))
+        emit(process_pending(conn, limit=limit, cpu=cpu, retry_errors=retry_errors, model=model))
 
 
 @app.command()
@@ -579,45 +607,49 @@ def search(query: str, limit: int = 30):
 
 
 @app.command("semantic-search")
-def semantic_search(query: str, limit: int = 30, cpu: bool = False):
+def semantic_search(query: str, limit: int = 30, cpu: bool = False, model: str = 'openclip'):
     """Find images whose visual embedding matches a text description."""
-    from .embeddings import MODEL_ID, create_embedder
-    encoder = create_embedder(cpu=cpu)
+    from .embeddings import create_embedder
+    from .embedding_models import get_model, model_sql
+    spec = get_model(model)
+    encoder = create_embedder(cpu=cpu, model=spec.key)
     try:
         vector = vector_literal(encoder.text(query))
     finally:
         if hasattr(encoder, "close"):
             encoder.close()
     with connect() as conn:
-        rows = conn.execute("""SELECT id,path,1-(embedding <=> %s::halfvec) AS similarity
+        rows = conn.execute(model_sql("""SELECT id,path,1-(embedding <=> %s::halfvec) AS similarity
                               FROM images WHERE missing=false AND embedding_model=%s
-                              ORDER BY embedding <=> %s::halfvec LIMIT %s""",
-                            (vector, MODEL_ID, vector, limit)).fetchall()
+                              ORDER BY embedding <=> %s::halfvec LIMIT %s""", spec),
+                            (vector, spec.id, vector, limit)).fetchall()
     emit(rows)
 
 
 @app.command()
-def similar(image_id: int, limit: int = 20):
+def similar(image_id: int, limit: int = 20, model: str = 'openclip'):
     """Find visually similar images by ID."""
+    from .embedding_models import get_model, model_sql
+    spec = get_model(model)
     with connect() as conn:
-        source = conn.execute("SELECT embedding::text AS embedding,embedding_model FROM images WHERE id=%s", (image_id,)).fetchone()
+        source = conn.execute(f"SELECT {spec.column()}::text AS embedding,{spec.column('_model')} AS embedding_model FROM images WHERE id=%s", (image_id,)).fetchone()
         if not source or not source["embedding"]:
             raise typer.BadParameter("Image has no embedding")
-        rows = conn.execute("""SELECT id,path,1-(embedding <=> %s::halfvec) AS similarity
+        rows = conn.execute(model_sql("""SELECT id,path,1-(embedding <=> %s::halfvec) AS similarity
                               FROM images WHERE missing=false AND id<>%s AND embedding_model=%s
-                              ORDER BY embedding <=> %s::halfvec LIMIT %s""",
+                              ORDER BY embedding <=> %s::halfvec LIMIT %s""", spec),
                             (source["embedding"], image_id, source["embedding_model"], source["embedding"], limit)).fetchall()
     emit(rows)
 
 
 @app.command('image-search')
-def image_search(image: Path, limit: int = typer.Option(30, min=1, max=500), cpu: bool = False):
+def image_search(image: Path, limit: int = typer.Option(30, min=1, max=500), cpu: bool = False, model: str = 'openclip'):
     """Find catalog images resembling a reference file, without indexing it."""
     from .image_query import encode_reference, search
     try:
-        vector = encode_reference(image, cpu=cpu)
+        vector = encode_reference(image, cpu=cpu, model=model)
         with connect() as conn:
-            emit(search(conn, vector, limit=limit))
+            emit(search(conn, vector, limit=limit, model=model))
     except (OSError, ValueError, RuntimeError) as exc:
         raise typer.BadParameter(str(exc)) from exc
 
@@ -651,6 +683,7 @@ def show(image_id: int):
         if not image:
             raise typer.BadParameter("Unknown image ID")
         image.pop("embedding", None)
+        image.pop('gemma_embedding', None)
         for key in ("ocr_text", "ocr_model", "ocr_status", "ocr_error", "ocr_at"):
             image.pop(key, None)
         image["faces"] = conn.execute("""SELECT f.id,f.x,f.y,f.width,f.height,f.group_id,f.confidence,

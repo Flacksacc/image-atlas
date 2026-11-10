@@ -26,6 +26,7 @@ class FaceWorkerClient:
         self.process = None
         self.images = 0
         self.restarts = 0
+        self.device = 'unknown'
         self._start()
 
     def _start(self):
@@ -49,8 +50,10 @@ class FaceWorkerClient:
                 process.stdout.close()
         threading.Thread(target=read, daemon=True).start()
         try:
-            if self._exchange({'operation': 'check'}).get('ready') is not True:
+            ready = self._exchange({'operation': 'check'})
+            if ready.get('ready') is not True:
                 raise FaceSetupError('Face worker did not confirm startup')
+            self.device = str(ready.get('device', 'unknown'))
         except Exception as exc:
             self.abort()
             raise FaceSetupError(str(exc)) from exc

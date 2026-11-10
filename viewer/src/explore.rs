@@ -22,6 +22,7 @@ pub(crate) fn oriented_sql(sql:&str)->String {
 }
 
 pub struct Request {
+    pub model: crate::embedding_models::EmbeddingModel,
     pub generation: u64,
     pub phase: u8,
     pub query: String,
@@ -498,7 +499,8 @@ pub fn run(
         )
     });
     let vector = if vector.is_some() { vector } else if let Some(id) = request.source_image_id {
-        Some(client.query_opt("SELECT embedding::text FROM images WHERE id=$1 AND embedding IS NOT NULL AND embedding_model='open_clip:ViT-B-32:laion2b_s34b_b79k'", &[&id])?
+        let prefix = request.model.prefix();
+        Some(client.query_opt(&format!("SELECT {prefix}embedding::text FROM images WHERE id=$1 AND {prefix}embedding IS NOT NULL AND {prefix}embedding_model=$2"), &[&id,&request.model.id()])?
             .ok_or_else(|| anyhow::anyhow!("Image #{id} has no compatible visual embedding; its embedding needs to be rebuilt with the current model"))?.get(0))
     } else { None };
     let has_vector = vector.is_some();
@@ -508,7 +510,7 @@ pub fn run(
         Box::new(request.relevance.clamp(0.0, 1.0)),
         Box::new(request.source_image_id),
     ];
-    let filter_sql = filter_sql(&request.filters, &mut values)?;
+    let filter_sql = request.model.search_sql(&filter_sql(&request.filters, &mut values)?);
     let outer_filter = format!("($2 OR NOT i.missing) AND \
         ($3::text IS NULL OR i.path LIKE $3 ESCAPE '!') AND \
         ($4::text IS NULL OR i.capture_day >= $4::text::date) AND \
@@ -520,7 +522,7 @@ pub fn run(
         "WITH ranked AS (SELECT id,false AS text_hit,NULL::float8 AS distance FROM images \
          WHERE $1::text='' AND $6::text IS NULL AND $7::float8>=0 AND $8::bigint IS NULL) ".to_owned()
     } else {
-        HITS.replace("{filter_sql}", &filter_sql).replace("{visual_order}", &visual_order)
+        request.model.search_sql(&HITS.replace("{filter_sql}", &filter_sql).replace("{visual_order}", &visual_order))
     };
     let order = request.sort.order_sql();
     let sort_keys = [request.sort.primary, request.sort.secondary];
@@ -701,7 +703,7 @@ mod tests {
         cursor: Option<super::PageCursor>, stacks: bool) -> anyhow::Result<Vec<crate::db::Photo>> {
         let (tx, rx) = unbounded();
         run(client, Request {
-            generation: 9, phase: 0, query: String::new(), folder: Some(root.into()),
+            model: Default::default(), generation: 9, phase: 0, query: String::new(), folder: Some(root.into()),
             from_day: None, to_day: None, vector: None, source_image_id: None, show_missing: false,
             offset: 0, cursor, include_facets: false, relevance: 0.22, filters: Vec::new(), sort,
             need_unique: false, need_geo: false, need_scatter: false, need_folder_month: false,
@@ -788,21 +790,24 @@ mod tests {
             let mut vector=vec![0.0_f32;512];vector[0]=first;vector[1]=(1.0-first*first).sqrt();
             let value=format!("[{}]",vector.iter().map(f32::to_string).collect::<Vec<_>>().join(","));
             ids.push(client.query_one("INSERT INTO images(path,root_path,size_bytes,mtime_ns,embedding,embedding_model) VALUES ($1,$2,1,1,$3::text::halfvec,'open_clip:ViT-B-32:laion2b_s34b_b79k') RETURNING id",&[&format!("{root}/{index}.png"),&root,&value])?.get::<_,i64>(0));
+            let mut gemma=vec![0.0_f32;512];gemma[0]=if index==0 {0.8}else{1.0};gemma[1]=(1.0-gemma[0]*gemma[0]).sqrt();
+            let gemma=format!("[{}]",gemma.iter().map(f32::to_string).collect::<Vec<_>>().join(","));
+            client.execute("UPDATE images SET gemma_embedding=$1::text::halfvec,gemma_embedding_model='google:embeddinggemma-2:512' WHERE id=$2",&[&gemma,&ids[index]])?;
         }
         let result=(|| -> anyhow::Result<()> {
-            for phase in [1,2] {
+            for (model,expected) in [(crate::embedding_models::EmbeddingModel::OpenClip,0),(crate::embedding_models::EmbeddingModel::EmbeddingGemma2,1)] { for phase in [1,2] {
                 let (tx,rx)=unbounded();let mut vector=vec![0.0;512];vector[0]=1.0;
                 run(&mut client,Request {
-                    generation:9,phase,query:String::new(),folder:None,from_day:None,to_day:None,
+                    model, generation:9,phase,query:String::new(),folder:None,from_day:None,to_day:None,
                     vector:Some(vector),source_image_id:None,show_missing:false,offset:0,cursor:None,
                     include_facets:true,relevance:0.9,filters:vec![super::FilterChip{field:"root".into(),value:root.clone(),exclude:false}],
                     sort:super::SortSpec::default(),need_unique:false,need_geo:false,need_scatter:false,need_folder_month:false,
                     page_limit:200,heatmap_year:2026,duplicate_stacks:false,
                 },&tx,&AtomicU64::new(9))?;
                 let events:Vec<_>=rx.try_iter().collect();
-                assert!(events.iter().any(|event|matches!(event,Event::ExplorePage{photos,..} if photos.len()==1&&photos[0].id==ids[0])));
+                assert!(events.iter().any(|event|matches!(event,Event::ExplorePage{photos,..} if photos.len()==1&&photos[0].id==ids[expected])));
                 assert!(events.iter().any(|event|matches!(event,Event::ExploreFacets{total,..} if *total==1)));
-            }
+            }}
             Ok(())
         })();
         client.execute("DELETE FROM images WHERE id=ANY($1)",&[&ids])?;result
@@ -830,7 +835,7 @@ mod tests {
         let (tx, rx) = unbounded();
         let started = std::time::Instant::now();
         let request = Request {
-            generation: 1, phase: 0, query: String::new(), folder: None,
+            model: Default::default(), generation: 1, phase: 0, query: String::new(), folder: None,
             from_day: None, to_day: None, vector: None, source_image_id: None,
             show_missing: false, offset: 0, cursor: None, include_facets: true,
             relevance: 0.22, filters: Vec::new(), sort: super::SortSpec::default(),
@@ -881,7 +886,7 @@ mod tests {
             run(
                 &mut client,
                 Request {
-                    generation: 1,
+                    model: Default::default(), generation: 1,
                     phase: 0,
                     query: String::new(),
                     folder: Some(root.clone()),
@@ -927,7 +932,7 @@ mod tests {
             run(
                 &mut client,
                 Request {
-                    generation: 1,
+                    model: Default::default(), generation: 1,
                     phase: 0,
                     query: String::new(),
                     folder: Some(root.clone()),
@@ -956,7 +961,7 @@ mod tests {
             run(
                 &mut client,
                 Request {
-                    generation: 1,
+                    model: Default::default(), generation: 1,
                     phase: 0,
                     query: "dog".into(),
                     folder: Some(root.clone()),
@@ -997,7 +1002,7 @@ mod tests {
             client.execute("UPDATE images SET dhash_num=15,width=100,height=100,format='PNG' WHERE path=$1", &[&first])?;
             client.execute("UPDATE images SET dhash_num=7,width=200,height=200,format='JPG' WHERE path=$1", &[&second])?;
             run(&mut client, Request {
-                generation: 1, phase: 0, query: String::new(), folder: Some(root.clone()),
+                model: Default::default(), generation: 1, phase: 0, query: String::new(), folder: Some(root.clone()),
                 from_day: None, to_day: None, vector: None, source_image_id: None,
                 show_missing: false, offset: 0, cursor: None, include_facets: false,
                 relevance: 0.22,
@@ -1013,7 +1018,7 @@ mod tests {
             anyhow::ensure!(photos.len()==1 && photos[0].path==second);
             client.execute("UPDATE images SET sha256='same-hash' WHERE root_path=$1", &[&root])?;
             run(&mut client, Request {
-                generation: 1, phase: 0, query: String::new(), folder: Some(root.clone()),
+                model: Default::default(), generation: 1, phase: 0, query: String::new(), folder: Some(root.clone()),
                 from_day: None, to_day: None, vector: None, source_image_id: None,
                 show_missing: false, offset: 0, cursor: None, include_facets: true,
                 relevance: 0.22, filters: Vec::new(), sort: super::SortSpec::default(),
@@ -1025,7 +1030,7 @@ mod tests {
             let Event::ExploreFacets { total, .. } = rx.recv()? else { anyhow::bail!("missing duplicate facets") };
             anyhow::ensure!(total==1);
             run(&mut client, Request {
-                generation: 1, phase: 0, query: String::new(), folder: Some(root.clone()),
+                model: Default::default(), generation: 1, phase: 0, query: String::new(), folder: Some(root.clone()),
                 from_day: None, to_day: None, vector: None, source_image_id: None,
                 show_missing: false, offset: 0, cursor: None, include_facets: true,
                 relevance: 0.22, filters: Vec::new(), sort: super::SortSpec::default(),

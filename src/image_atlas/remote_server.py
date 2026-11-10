@@ -37,14 +37,15 @@ def readonly(catalog):
 def create_app(catalog, *, cpu=False, encoder_factory=None):
     token = secrets.token_urlsafe(32)
     lock = threading.Lock()
-    encoder = None
+    encoders = {}
     device = 'not loaded'
 
     @asynccontextmanager
     async def lifespan(app):
         yield
-        if encoder is not None and hasattr(encoder, 'close'):
-            encoder.close()
+        for encoder in encoders.values():
+            if hasattr(encoder, 'close'):
+                encoder.close()
 
     app = FastAPI(title='ImageAtlas remote session', docs_url=None, redoc_url=None,
                   openapi_url=None, lifespan=lifespan)
@@ -68,20 +69,23 @@ def create_app(catalog, *, cpu=False, encoder_factory=None):
 
     @app.get('/v1/session')
     def session():
-        from .embeddings import MODEL_ID
+        from .embedding_models import OPENCLIP, MODELS
         with readonly(catalog) as conn:
             count = conn.execute('SELECT count(*) n FROM images').fetchone()['n']
         return dict(catalog_id=catalog.id, name=catalog.name, images=count,
-                    preview_version=VERSION, encoder_device=device, image_search_model=MODEL_ID)
+                    preview_version=VERSION, encoder_device=device, image_search_model=OPENCLIP.id,
+                    image_search_models=[model.id for model in MODELS])
 
-    def query_vector(q):
-        nonlocal encoder, device
+    def query_vector(q, spec):
+        nonlocal device
         from .embeddings import create_embedder
         from .db import vector_literal
         with lock:
             try:
+                encoder = encoders.get(spec.key)
                 if encoder is None:
-                    encoder = (encoder_factory or create_embedder)(cpu=cpu)
+                    encoder = encoder_factory(cpu=cpu) if encoder_factory else create_embedder(cpu=cpu, model=spec.key)
+                    encoders[spec.key] = encoder
                     device = str(getattr(encoder, 'device', 'worker: GPU preferred' if not cpu else 'cpu'))
                     if not cpu and device == 'cpu':
                         LOG.warning('No supported GPU available; visual text search is using CPU')
@@ -94,7 +98,12 @@ def create_app(catalog, *, cpu=False, encoder_factory=None):
     def search(q: str = Query('', max_length=1000), mode: str = 'combined',
                limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
                min_pixels: int = Query(0, ge=0), orientation: str = 'any', format: str = '',
-               image_vector: str = Query('', max_length=16000)):
+               image_vector: str = Query('', max_length=16000), model: str = 'openclip'):
+        from .embedding_models import get_model, model_sql
+        try:
+            spec = get_model(model)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
         if mode not in {'text', 'visual', 'combined'} or orientation not in {'any', 'landscape', 'portrait', 'square'}:
             raise HTTPException(400, 'Invalid search mode or orientation')
         if image_vector:
@@ -106,12 +115,11 @@ def create_app(catalog, *, cpu=False, encoder_factory=None):
                 raise HTTPException(400, 'Invalid image search vector') from None
             mode, q = 'visual', 'reference image'
         else:
-            vector = query_vector(q) if q.strip() and mode != 'text' else None
-        from .embeddings import MODEL_ID
+            vector = query_vector(q, spec) if q.strip() and mode != 'text' else None
         # Token matching handles folders and collections with spaces; visual matching supplies semantics.
         tokens = q.casefold().replace("'", '').replace('’', '').split()
         with readonly(catalog) as conn:
-            rows = conn.execute('''WITH candidates AS (
+            rows = conn.execute(model_sql('''WITH candidates AS (
               SELECT i.*,coalesce(s.search_text,'') || ' ' || coalesce((SELECT string_agg(tag,' ')
                 FROM image_tags WHERE image_id=i.id),'') || ' ' || coalesce((SELECT string_agg(label,' ')
                 FROM image_labels WHERE image_id=i.id),'') || ' ' || coalesce((SELECT string_agg(
@@ -142,8 +150,8 @@ def create_app(catalog, *, cpu=False, encoder_factory=None):
                 OR (%s='visual' AND similarity IS NOT NULL) OR (%s='combined' AND (text_match OR similarity IS NOT NULL)))
               ORDER BY (CASE WHEN %s='combined' THEN coalesce(similarity,0)+CASE WHEN text_match THEN 1 ELSE 0 END
                 WHEN %s='visual' THEN similarity ELSE 0 END) DESC NULLS LAST,id
-              LIMIT %s OFFSET %s''',
-              (vector, MODEL_ID, vector, min_pixels, format, format, orientation, orientation, orientation,
+              LIMIT %s OFFSET %s''', spec),
+              (vector, spec.id, vector, min_pixels, format, format, orientation, orientation, orientation,
                orientation, tokens, THUMBNAIL_VERSION, VERSION, q.strip(), mode, mode, mode, mode, mode, limit, offset)).fetchall()
         for row in rows:
             row['match_reasons'] = (['indexed text'] if row['text_match'] and q else []) + (['visual similarity'] if row['similarity'] is not None else [])
@@ -164,7 +172,7 @@ def create_app(catalog, *, cpu=False, encoder_factory=None):
         with readonly(catalog) as conn:
             row = image_record(conn, image_id)
             # Do not transfer vectors with the metadata response.
-            return {k: v for k, v in row.items() if k != 'embedding'}
+            return {k: v for k, v in row.items() if k not in {'embedding', 'gemma_embedding'}}
 
     @app.get('/v1/images/{image_id}/{kind}')
     def image_bytes(image_id: int, kind: str):

@@ -155,7 +155,7 @@ main{padding:20px 28px}.grid{display:grid;grid-template-columns:repeat(auto-fill
 .group img{width:120px;height:120px;object-fit:cover} .faces{display:flex;flex-wrap:wrap;gap:6px}.hint{color:#9fb3bf}pre{white-space:pre-wrap;word-break:break-word}
 header h1{display:flex;align-items:center;gap:10px}dialog{max-width:min(360px,85vw);max-height:85vh;overflow:auto;text-align:center;background:#17242d;color:#e9eef2;border:1px solid #63717a;border-radius:12px;padding:24px}dialog img{display:block;margin:auto}dialog a{color:#8ddded}dialog::backdrop{background:#0009}
 </style></head><body><header><h1><img src="/logo.png" alt="" width="42" height="42"> ImageAtlas</h1><nav><button title="Review, sort, and group indexed images" onclick="loadImages()">Images</button><button title="Review face samples and assign or ignore person identities" onclick="loadGroups()">People</button><button title="Review suggested file destinations without moving originals" onclick="loadProposals()">Sort proposals</button><button onclick="document.getElementById('about-dialog').showModal()">About ImageAtlas</button></nav>
-<p><input id="query" placeholder="Search filename"><button onclick="loadImages()">Search</button> <button onclick="document.getElementById('image-query').click()">Search by image…</button><input id="image-query" type="file" accept="image/*" hidden> <label><input id="show-missing" type="checkbox" onchange="loadImages()"> Show missing files</label></p><div id="sort-tools"></div></header><main id="main"></main>
+<p><label>Search model <select id="embedding-model"><option value="openclip">OpenCLIP</option><option value="embeddinggemma2">EmbeddingGemma 2</option></select></label> <label><input id="semantic-search" type="checkbox"> Image content</label><input id="query" placeholder="Filename or description"><button onclick="loadImages()">Search</button> <button onclick="document.getElementById('image-query').click()">Search by image…</button><input id="image-query" type="file" accept="image/*" hidden> <label><input id="show-missing" type="checkbox" onchange="loadImages()"> Show missing files</label></p><div id="sort-tools"></div></header><main id="main"></main>
 <dialog id="about-dialog" aria-labelledby="about-title"><img src="/logo.png" alt="ImageAtlas globe made of photographs" width="160" height="160"><h2 id="about-title">ImageAtlas</h2><p>Version __IMAGEATLAS_VERSION__</p><p>Find, explore, and organize your image library.</p><p><a href="https://github.com/Flacksacc/image-atlas">GitHub repository</a></p><form method="dialog"><button>Close</button></form></dialog>
 <script>
 const main=document.getElementById('main');const escapeHtml=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -170,7 +170,7 @@ function sortToolbar(){document.getElementById('sort-tools').innerHTML='<div cla
 function quickSort(key){if(sortField===key)sortDescending=!sortDescending;else{sortField=key;sortDescending=!['Filename','Path','Folder','Format','Camera'].includes(key)}loadImages()}
 function imageCard(x){let hint=x.path+' · '+x.width+' × '+x.height+' · '+x.size_bytes+' bytes · Date '+(x.capture_day||'unknown')+' · Camera '+(x.camera_model||'unknown')+' · '+x.rating+' stars · '+x.review_state;return '<div class="card" title="'+escapeHtml(hint)+'"><img loading="lazy" alt="Image #'+x.id+'" src="/api/images/'+x.id+'/thumb"><b>#'+x.id+(x.missing?' · Missing original':'')+'</b><small>'+escapeHtml(x.path)+'</small><small title="Saved collections">'+escapeHtml(x.collections||'')+'</small></div>'}
 function renderImages(){let body='';if(groupField==='None')body='<div class="grid">'+imageRows.map(imageCard).join('')+'</div>';else{let groups=new Map();for(let x of imageRows){let key=x.image_group||'Unknown';if(!groups.has(key))groups.set(key,[]);groups.get(key).push(x)}for(let [key,rows] of groups)body+='<h2 class="group-heading" title="'+escapeHtml(key)+'">'+escapeHtml(key)+'</h2><div class="grid">'+rows.map(imageCard).join('')+'</div>'}main.innerHTML='<p class="hint" title="Sorting and grouping apply before pagination">'+imageRows.length+' images loaded'+(collectionFilter?' · Collection #'+collectionFilter+' <button title="Show all catalog images" onclick="collectionFilter=null;loadImages()">Clear collection filter</button>':'')+'</p>'+body+(hasMore?'<p><button id="load-more" title="Load the next page in the current sort order" onclick="loadImages(true)">Load more</button></p>':'')}
-async function loadImages(append=false){if(typeof referenceVector!=='undefined'&&referenceVector){if(collectionFilter){referenceVector=null;referenceFileName='';}else return loadReferenceImages(append);}activeView='images';let generation=append?imageGeneration:++imageGeneration;sortToolbar();let q=document.getElementById('query').value;let missing=document.getElementById('show-missing').checked;if(!append)imageRequestParams={q,include_missing:missing,sort:sortField,descending:sortDescending,secondary:secondaryField,secondary_descending:secondaryDescending,group_by:groupField,limit:imagePageSize,...(collectionFilter?{collection_id:collectionFilter}:{})};let params=new URLSearchParams({...imageRequestParams,offset:append?imageRows.length:0});let more=document.getElementById('load-more');if(more)more.disabled=true;try{let data=await get('/api/images?'+params);if(generation!==imageGeneration||activeView!=='images')return;imageRows=append?imageRows.concat(data):data;hasMore=data.length===imagePageSize;renderImages()}catch(e){if(generation===imageGeneration&&activeView==='images')main.innerHTML='<p role="alert">'+escapeHtml(e.message)+'</p>';if(more)more.disabled=false}}
+async function loadImages(append=false){if(typeof searchByText==='function'&&document.getElementById('semantic-search').checked&&document.getElementById('query').value.trim()&&!collectionFilter){if(append&&referenceVector)return loadReferenceImages(true);return searchByText();}if(typeof referenceVector!=='undefined'&&referenceVector){if(collectionFilter){referenceVector=null;referenceFileName='';}else return loadReferenceImages(append);}activeView='images';let generation=append?imageGeneration:++imageGeneration;sortToolbar();let q=document.getElementById('query').value;let missing=document.getElementById('show-missing').checked;if(!append)imageRequestParams={q,include_missing:missing,sort:sortField,descending:sortDescending,secondary:secondaryField,secondary_descending:secondaryDescending,group_by:groupField,limit:imagePageSize,...(collectionFilter?{collection_id:collectionFilter}:{})};let params=new URLSearchParams({...imageRequestParams,offset:append?imageRows.length:0});let more=document.getElementById('load-more');if(more)more.disabled=true;try{let data=await get('/api/images?'+params);if(generation!==imageGeneration||activeView!=='images')return;imageRows=append?imageRows.concat(data):data;hasMore=data.length===imagePageSize;renderImages()}catch(e){if(generation===imageGeneration&&activeView==='images')main.innerHTML='<p role="alert">'+escapeHtml(e.message)+'</p>';if(more)more.disabled=false}}
 let groupRows=[];
 async function loadGroups(append=false){activeView='people';let generation=++imageGeneration;document.getElementById('sort-tools').innerHTML='';if(!append)groupRows=[];let [data,people]=await Promise.all([get('/api/groups?limit=100&offset='+groupRows.length),get('/api/people')]);if(generation!==imageGeneration||activeView!=='people')return;groupRows=append?groupRows.concat(data):data;main.innerHTML='<h2>Face groups</h2><p class="hint">Review each group before applying a name. New matches remain suggestions.</p><div class="grid">'+groupRows.map(g=>
 '<div class="card group" title="Review the face samples, then select a person ID or ignore the identity"><b>Group #'+g.group_id+' · '+g.face_count+' faces</b><p>'+escapeHtml(g.person||('Suggested: '+(g.suggested_person||'unassigned')))+'</p><div class="faces">'+g.face_ids.map(id=>'<img title="Face sample #'+id+'" loading="lazy" src="/api/faces/'+id+'/thumb">').join('')+'</div><p><select title="Reuse an existing stable person ID or create a new name" id="person-'+g.group_id+'"><option value="">New person</option>'+people.map(p=>'<option value="'+p.id+'"'+(p.id===(g.person_id||g.suggested_person_id)?' selected':'')+'>'+escapeHtml(p.name)+' (#'+p.id+')</option>').join('')+'</select><input id="name-'+g.group_id+'" placeholder="Person name"><button onclick="tag('+g.group_id+')" title="Assign all current faces in this sample set">Save person</button><button onclick="ignoreGroup('+g.group_id+')" title="Ignore this identity and future confident matches, retaining recognition samples">Ignore person</button></p></div>').join('')+'</div>'+(data.length===100?'<p><button title="Load the next 100 reviewable groups" onclick="loadGroups(true)">Load more face groups</button></p>':'')}
@@ -271,7 +271,7 @@ def collections_script():
 
 
 @app.post('/api/search/image')
-async def search_reference(request: Request, include_missing: bool = False):
+async def search_reference(request: Request, include_missing: bool = False, model: str = 'openclip'):
     import tempfile
     from starlette.concurrency import run_in_threadpool
     from .image_query import MAX_BYTES, encode_reference, search
@@ -286,18 +286,37 @@ async def search_reference(request: Request, include_missing: bool = False):
                 output.write(chunk)
         def query():
             with IMAGE_SEARCH_LOCK:
-                vector = encode_reference(path)
+                vector = encode_reference(path, model=model)
             with connect() as conn:
-                rows = search(conn, vector, include_missing=include_missing)
-            return {'items': rows, 'vector': vector}
+                rows = search(conn, vector, include_missing=include_missing, model=model)
+            return {'items': rows, 'vector': vector, 'model': model}
         try:
             return await run_in_threadpool(query)
         except (OSError, ValueError, RuntimeError) as exc:
             raise HTTPException(400, str(exc)) from exc
 
 
+@app.get('/api/search/text')
+def search_content(q: str = Query(..., min_length=1, max_length=1000), model: str = 'openclip', include_missing: bool = False):
+    from .embeddings import create_embedder
+    from .image_query import search, validate_vector
+    try:
+        with IMAGE_SEARCH_LOCK:
+            encoder = create_embedder(model=model)
+            try:
+                vector = validate_vector(encoder.text(q))
+            finally:
+                encoder.close()
+        with connect() as conn:
+            rows = search(conn, vector, include_missing=include_missing, model=model)
+        return {'items': rows, 'vector': vector, 'model': model}
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 class ReferencePage(BaseModel):
     vector: list[float]
+    model: str = 'openclip'
     offset: int = 0
     include_missing: bool = False
 
@@ -307,7 +326,7 @@ def search_reference_page(request: ReferencePage):
     from .image_query import search
     try:
         with connect() as conn:
-            return search(conn, request.vector, offset=request.offset, include_missing=request.include_missing)
+            return search(conn, request.vector, offset=request.offset, include_missing=request.include_missing, model=request.model)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 

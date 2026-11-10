@@ -41,7 +41,30 @@ def decode(data):
     return Image.fromarray(pixels)
 
 
-def ensure(conn, sha, path, counts):
+def prepare(sha, path, *, check=None):
+    """Encode without a database connection; the coordinator publishes the result."""
+    check = check or (lambda: None)
+    status, reason, data, width, height = 'done', None, None, None, None
+    try:
+        from .indexer import digest
+        path = Path(path)
+        check()
+        if digest(path) != sha:
+            raise ValueError('Source changed since indexing; rescan it before building a preview')
+        check()
+        data, width, height = encode(path)
+        check()
+        if digest(path) != sha:
+            raise ValueError('Source changed while building its preview; rescan it and retry')
+    except Exception as exc:
+        from .documents import PreviewUnavailable
+        status = 'unsupported' if isinstance(exc, PreviewUnavailable) else 'error'
+        reason = str(exc)[:1000]
+        data, width, height = None, None, None
+    return dict(sha=sha, status=status, error=reason, data=data, width=width, height=height)
+
+
+def ensure(conn, sha, path, counts, *, prepared=None):
     """Called only after metadata commit; preview failure cannot undo indexing."""
     row = conn.execute('SELECT status FROM image_previews WHERE sha256=%s AND version=%s',
                        (sha, VERSION)).fetchone()
@@ -53,20 +76,9 @@ def ensure(conn, sha, path, counts):
     if unavailable_cloud_file(Path(path)):
         counts['previews_pending'] += 1
         return
-    status, reason, data, width, height = 'done', None, None, None, None
-    try:
-        from .indexer import digest
-        path = Path(path)
-        if digest(path) != sha:
-            raise ValueError('Source changed since indexing; rescan it before building a preview')
-        data, width, height = encode(path)
-        if digest(path) != sha:
-            raise ValueError('Source changed while building its preview; rescan it and retry')
-    except Exception as exc:
-        from .documents import PreviewUnavailable
-        status = 'unsupported' if isinstance(exc, PreviewUnavailable) else 'error'
-        reason = str(exc)[:1000]
-        data, width, height = None, None, None
+    artifact = prepared if prepared and prepared['sha'] == sha else prepare(sha, path)
+    status, reason = artifact['status'], artifact['error']
+    data, width, height = artifact['data'], artifact['width'], artifact['height']
     conn.execute('''INSERT INTO image_previews(sha256,version,status,width,height,data,error)
         VALUES(%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(sha256,version) DO UPDATE SET
         status=excluded.status,width=excluded.width,height=excluded.height,data=excluded.data,

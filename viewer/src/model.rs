@@ -3,8 +3,8 @@ use eframe::egui;
 use serde::Deserialize;
 use std::{io::{BufRead, BufReader, Read, Write}, process::{Child, Command, Stdio}, sync::{Arc, atomic::{AtomicU64, Ordering}}, thread, time::Duration};
 
-pub enum Request { Encode { generation: u64, text: String }, EncodeImage { generation: u64, path: std::path::PathBuf }, Retry }
-pub enum Event { Ready, Vector { generation: u64, vector: Vec<f32> }, Error { generation: u64, error: String } }
+pub enum Request { Encode { generation: u64, text: String, model: crate::embedding_models::EmbeddingModel }, EncodeImage { generation: u64, path: std::path::PathBuf, model: crate::embedding_models::EmbeddingModel }, Retry }
+pub enum Event { Ready { generation: u64 }, Vector { generation: u64, vector: Vec<f32> }, Error { generation: u64, error: String } }
 #[derive(Deserialize)] struct WorkerResponse { embedding: Option<Vec<f32>>, error: Option<String> }
 
 struct Worker { child: Child, input: Sender<Vec<u8>>, replies: Receiver<Result<String,String>>,
@@ -12,10 +12,14 @@ struct Worker { child: Child, input: Sender<Vec<u8>>, replies: Receiver<Result<S
 }
 impl Drop for Worker { fn drop(&mut self) { let _=self.child.kill();let _=self.child.wait(); } }
 impl Worker {
-    fn spawn(python:Option<&str>) -> anyhow::Result<Self> {
-        let mut command=Command::new(python.map(str::to_owned).or_else(||std::env::var("IMAGE_CLI_VISION_PYTHON").ok()).unwrap_or_else(||"python".into()));
+    fn spawn(python:Option<&str>, model:crate::embedding_models::EmbeddingModel) -> anyhow::Result<Self> {
+        let executable = if model == crate::embedding_models::EmbeddingModel::EmbeddingGemma2 {
+            std::env::var("IMAGE_CLI_GEMMA_PYTHON").ok().or_else(||std::env::var("IMAGE_CLI_PYTHON").ok())
+                .unwrap_or_else(||std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.venv/Scripts/python.exe").to_string_lossy().into_owned())
+        } else { python.map(str::to_owned).or_else(||std::env::var("IMAGE_CLI_VISION_PYTHON").ok()).unwrap_or_else(||"python".into()) };
+        let mut command=Command::new(executable);
         crate::actions::scrub_environment(&mut command);
-        command.args(["-m","image_atlas.embedding_worker"]).env("PYTHONUTF8","1").env("PYTHONIOENCODING","utf-8")
+        command.args(["-m","image_atlas.embedding_worker","--model",model.key()]).env("PYTHONUTF8","1").env("PYTHONIOENCODING","utf-8")
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
         if let Ok(root)=std::env::var("IMAGE_CLI_MODULE_ROOT"){command.env("PYTHONPATH",root);}
         #[cfg(windows)] { use std::os::windows::process::CommandExt;command.creation_flags(0x08000000); }
@@ -56,19 +60,21 @@ pub fn start(ui:egui::Context,active:Arc<AtomicU64>,python:Option<String>)->(Sen
     let(request_tx,requests)=crossbeam_channel::bounded(32);let(events,event_rx)=crossbeam_channel::unbounded();
     thread::spawn(move || {
         let mut worker:Option<Worker>=None;
+        let mut worker_model = crate::embedding_models::EmbeddingModel::default();
         for request in requests {
             if matches!(request,Request::Retry){worker=None;continue;}
-            let (generation, operation, text) = match request {
-                Request::Encode { generation, text } => (generation, "text", text),
-                Request::EncodeImage { generation, path } => (generation, "reference-image", path.to_string_lossy().into_owned()),
+            let (generation, operation, text, model) = match request {
+                Request::Encode { generation, text, model } => (generation, "text", text, model),
+                Request::EncodeImage { generation, path, model } => (generation, "reference-image", path.to_string_lossy().into_owned(), model),
                 Request::Retry => continue,
             };
             if generation!=active.load(Ordering::Relaxed){continue;}
+            if worker_model != model { worker = None; worker_model = model; }
             let result=(|| -> anyhow::Result<Vec<f32>> {
                 if worker.is_none(){
-                    let mut started=Worker::spawn(python.as_deref())?;
+                    let mut started=Worker::spawn(python.as_deref(),model)?;
                     started.encode("photo",Duration::from_secs(180))?;
-                    worker=Some(started);let _=events.send(Event::Ready);ui.request_repaint();
+                    worker=Some(started);let _=events.send(Event::Ready { generation });ui.request_repaint();
                 }
                 worker.as_mut().unwrap().encode_operation(operation,&text,Duration::from_secs(60))
             })();

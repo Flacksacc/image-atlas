@@ -18,7 +18,7 @@ def main():
                     fatal = True
                     raise
             if request['operation'] == 'check':
-                response = {'ready': True}
+                response = {'ready': True, 'device': getattr(engine, 'device', 'unknown')}
             elif request['operation'] == 'detect':
                 response = {'faces': list(engine.detect(Path(request['path'])))}
             else:

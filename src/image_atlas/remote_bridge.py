@@ -16,7 +16,7 @@ def main():
         vector = args.get('image_vector')
         if path:
             from .image_query import encode_reference
-            vector = args['image_vector'] = encode_reference(path)
+            vector = args['image_vector'] = encode_reference(path, model=args.get('model', 'openclip'))
         result = remote.search(**args)
         if vector is not None:
             result['reference_vector'] = vector

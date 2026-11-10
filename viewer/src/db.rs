@@ -771,7 +771,7 @@ mod tests {
                 explore::run(
                     &mut client,
                     explore::Request {
-                        generation: 1,
+                        model: Default::default(), generation: 1,
                         phase: 0,
                         query: term.into(),
                         folder: None,
@@ -803,7 +803,7 @@ mod tests {
             explore::run(
                 &mut client,
                 explore::Request {
-                    generation: 1,
+                    model: Default::default(), generation: 1,
                     phase: 1,
                     query: "visual probe".into(),
                     folder: None,

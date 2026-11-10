@@ -1,15 +1,20 @@
-"""Line-delimited JSON OpenCLIP worker for an existing CUDA environment."""
+"""Line-delimited JSON worker for a selected local text/image encoder."""
 import json
 import importlib.util
 import sys
 from pathlib import Path
 
-from .embeddings import Embedder
+from .embeddings import local_embedder
 from .image_io import HEIF_AVAILABLE
 
 
-def main():
-    cpu = "--cpu" in sys.argv[1:]
+def main(argv=None):
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--cpu', action='store_true')
+    parser.add_argument('--model', default='openclip', choices=('openclip', 'embeddinggemma2'))
+    args = parser.parse_args(argv)
+    cpu = args.cpu
     encoder = None
     for line in sys.stdin:
         fatal = False
@@ -17,7 +22,10 @@ def main():
             request = json.loads(line)
             if encoder is None:
                 try:
-                    encoder = Embedder(cpu=cpu)
+                    # Libraries must not write progress messages into the JSON protocol.
+                    from contextlib import redirect_stdout
+                    with redirect_stdout(sys.stderr):
+                        encoder = local_embedder(cpu=cpu, model=args.model)
                 except Exception:
                     fatal = True
                     raise

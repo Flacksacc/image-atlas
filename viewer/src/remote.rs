@@ -32,6 +32,7 @@ fn execute(task:Task)->Result<ResultData,String>{
 }
 
 struct RemoteViewer {
+    embedding_model: crate::embedding_models::EmbeddingModel,
     image_search: crate::image_search::Source, image_vector: Option<Value>, image_key: Option<String>,
     query:String, mode:String, offset:usize, total:usize, items:Vec<Value>, selected:Option<i64>,
     queue:Queue,active:Arc<AtomicU64>,generation:u64,
@@ -61,7 +62,7 @@ impl RemoteViewer {
                 }else{std::thread::sleep(Duration::from_millis(20));}
             });
         }
-        let mut app=Self{image_search:Default::default(),image_vector:None,image_key:None,query:String::new(),mode:"combined".into(),offset:0,total:0,items:vec![],selected:None,
+        let mut app=Self{embedding_model:Default::default(),image_search:Default::default(),image_vector:None,image_key:None,query:String::new(),mode:"combined".into(),offset:0,total:0,items:vec![],selected:None,
             queue,active,generation:0,rx,cache:HashMap::new(),pending:HashSet::new(),failed:HashSet::new(),
             frame:0,message:String::new(),loading:false,last_image_click:None};
         #[cfg(debug_assertions)] if let Ok(query)=std::env::var("IMAGE_CLI_QA_QUERY"){app.query=query;app.mode="text".into();}
@@ -70,10 +71,10 @@ impl RemoteViewer {
     fn search(&mut self){
         self.generation+=1;self.active.store(self.generation,Ordering::Release);
         self.queue.lock().unwrap().clear();self.pending.clear();self.failed.clear();self.cache.clear();self.items.clear();self.selected=None;self.last_image_click=None;self.loading=true;
-        let key = self.image_search.key();
+        let key = self.image_search.key().map(|key|format!("{}:{key}",self.embedding_model.key()));
         if key != self.image_key { self.image_vector = None; }
         self.image_key = key;
-        let mut args = json!({"q":self.query,"mode":self.mode,"limit":100,"offset":self.offset});
+        let mut args = json!({"q":self.query,"mode":self.mode,"limit":100,"offset":self.offset,"model":self.embedding_model.key()});
         if let Some(path) = &self.image_search.path {
             if let Some(vector) = &self.image_vector { args["image_vector"] = vector.clone(); }
             else { args["image_path"] = path.to_string_lossy().into_owned().into(); }
@@ -167,6 +168,7 @@ impl RemoteViewer {
         }
         ui.horizontal_wrapped(|ui|{ui.heading("Remote images");crate::branding::about_button(ui);});
         crate::branding::about_ui(&ctx);
+        if self.embedding_model.controls(ui) { self.image_vector=None; self.offset=0; self.search(); }
         if let Some(action) = self.image_search.controls(ui) { self.reference_action(action); }
         let mut submit=false;
         ui.horizontal_wrapped(|ui|{
@@ -274,7 +276,7 @@ mod tests {
     use super::*;
     fn fixture()->RemoteViewer{
         let(_,rx)=crossbeam_channel::unbounded();
-        RemoteViewer{image_search:Default::default(),image_vector:None,image_key:None,query:String::new(),mode:"combined".into(),offset:0,total:1,
+        RemoteViewer{embedding_model:Default::default(),image_search:Default::default(),image_vector:None,image_key:None,query:String::new(),mode:"combined".into(),offset:0,total:1,
             items:vec![json!({"id":1,"path":"G:/Marketing/smores.jpg","width":6000,"height":4000,"format":"JPEG","has_preview":true})],selected:None,
             queue:Arc::new(Mutex::new(VecDeque::new())),active:Arc::new(AtomicU64::new(1)),generation:1,
             rx,cache:HashMap::new(),pending:HashSet::new(),failed:HashSet::new(),frame:0,message:String::new(),loading:false,last_image_click:None}

@@ -16,7 +16,7 @@ LABELS = (
 )
 
 
-def _prototype_matrix(conn, *, cpu=False):
+def _prototype_matrix(conn, *, cpu=False, runtime=None):
     stored = {row["label"]: row for row in conn.execute(
         "SELECT label,embedding::text AS embedding FROM label_prototypes WHERE model_id=%s", (MODEL_ID,))}
     missing = [label for label in LABELS if label not in stored]
@@ -24,6 +24,9 @@ def _prototype_matrix(conn, *, cpu=False):
     try:
         if missing:
             encoder = create_embedder(cpu=cpu)
+            if runtime is not None:
+                runtime(model='OpenCLIP ViT-B/32', model_id=MODEL_ID,
+                        device=str(getattr(encoder, 'device', 'unknown')), runtime_state='encoding label prompts')
             for label in missing:
                 vector = encoder.text(f"a photo of {label}")
                 conn.execute("""INSERT INTO label_prototypes(label,model_id,embedding)
@@ -47,7 +50,7 @@ def _prototype_matrix(conn, *, cpu=False):
 
 
 def process_pending(conn, *, cpu=False, retry_errors=False, root_path=None,
-                    image_ids=None, progress=None, selected_table=False):
+                    image_ids=None, progress=None, selected_table=False, runtime=None):
     statuses = ["pending", "error"] if retry_errors else ["pending"]
     scope = "AND EXISTS (SELECT 1 FROM mine_selected_ids s WHERE s.id=i.id)" if selected_table else ""
     conditions = f"""(i.labels_status=ANY(%s) OR
@@ -60,7 +63,9 @@ def process_pending(conn, *, cpu=False, retry_errors=False, root_path=None,
     result = {"processed": 0, "labels": 0, "errors": []}
     if not pending:
         return result
-    matrix = _prototype_matrix(conn, cpu=cpu)
+    matrix = _prototype_matrix(conn, cpu=cpu, runtime=runtime)
+    if runtime is not None:
+        runtime(model='OpenCLIP ViT-B/32', model_id=MODEL_ID, device='cpu', runtime_state='scoring cached vectors')
     last_id = 0
     while True:
         rows = conn.execute(f"""SELECT i.id,i.path,i.embedding::text AS embedding FROM images i

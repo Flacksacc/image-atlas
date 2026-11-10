@@ -12,6 +12,7 @@ def test_mine_all_scopes_analysis_to_target_and_skips_finished(monkeypatch, tmp_
     from image_atlas import embeddings, faces, labels
 
     class FakeEmbedder:
+        device = 'cpu'
         def image(self, path):
             return [1.0] + [0.0] * 511
 
@@ -19,6 +20,7 @@ def test_mine_all_scopes_analysis_to_target_and_skips_finished(monkeypatch, tmp_
             return [1.0] + [0.0] * 511
 
     class FakeFaces:
+        device = 'cpu'
         def detect(self, path):
             return []
 
@@ -45,6 +47,12 @@ def test_mine_all_scopes_analysis_to_target_and_skips_finished(monkeypatch, tmp_
     assert stages["embeddings"]["processed"] == 1
     assert stages["labels"]["processed"] == 1
     assert stages["faces"]["images"] == 1
+    assert stages['metadata']['model'] is None and stages['metadata']['gpu_used'] is False
+    assert stages['embeddings']['model'] == 'OpenCLIP ViT-B/32'
+    assert stages['labels']['model'] == 'OpenCLIP ViT-B/32'
+    assert stages['labels']['runtime_state'] == 'scoring cached vectors'
+    assert stages['faces']['model'] == 'YuNet + SFace'
+    assert all(stage['device'] == 'cpu' and stage['gpu_used'] is False for stage in stages.values())
     with connect() as conn:
         target = conn.execute("SELECT embedding_status,face_status FROM images WHERE root_path=%s",
                               (normalized_path(first),)).fetchone()
@@ -56,6 +64,7 @@ def test_mine_all_scopes_analysis_to_target_and_skips_finished(monkeypatch, tmp_
     assert repeat.exit_code == 0, repeat.output
     assert json.loads(repeat.stdout)["stages"]["metadata"]["unchanged"] == 1
     assert json.loads(repeat.stdout)["stages"]["embeddings"]["processed"] == 0
+    assert json.loads(repeat.stdout)['stages']['embeddings']['device'] == 'not used'
 
 
 def test_mine_tags_select_stages_and_reject_unknown(tmp_path):
@@ -257,23 +266,19 @@ def test_everything_unlimited_scopes_enrichment_to_discovered_images(monkeypatch
 
 
 def test_mine_can_cancel_and_preserve_completed_images(monkeypatch, tmp_path):
-    from image_atlas import indexer
+    from image_atlas.progress import MiningProgress
     from image_atlas.jobs import job_directory
     for number in range(3):
         Image.new("RGB", (24, 24), "red").save(tmp_path / f"{number}.png")
-    original = indexer.metadata
-    calls = 0
+    original = MiningProgress.advance
 
-    def cancel_after_first(path, **kwargs):
-        nonlocal calls
-        value = original(path, **kwargs)
-        calls += 1
-        if calls == 1:
+    def cancel_after_first(display):
+        original(display)
+        if display.stage == 'SCAN' and display.done == 1:
             from image_atlas.jobs import active_jobs
             (job_directory() / f"{active_jobs()[0]['id']}.cancel").touch()
-        return value
 
-    monkeypatch.setattr(indexer, "metadata", cancel_after_first)
+    monkeypatch.setattr(MiningProgress, 'advance', cancel_after_first)
     result = JsonCliRunner().invoke(app, ["mine", str(tmp_path), "--tags", "metadata"])
     assert result.exit_code == 130, result.output
     assert json.loads(result.stdout)["cancelled"] is True

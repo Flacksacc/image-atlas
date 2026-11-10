@@ -17,6 +17,7 @@ mod database_details;
 mod remote;
 mod branding;
 mod image_search;
+mod embedding_models;
 
 use chrono::{Datelike, Local, Months, NaiveDate};
 use crossbeam_channel::{Receiver, Sender};
@@ -52,6 +53,8 @@ impl Default for ExploreVisual { fn default() -> Self { Self::Folders } }
 
 #[derive(Serialize, Deserialize)]
 struct SavedState {
+    #[serde(default)]
+    embedding_model: embedding_models::EmbeddingModel,
     search: String,
     #[serde(default)]
     reference_image: Option<PathBuf>,
@@ -217,6 +220,7 @@ struct CachedTexture {
 }
 
 pub struct Viewer {
+    embedding_model: embedding_models::EmbeddingModel,
     catalog_panel: catalogs::Panel,
     external_catalog_selector:bool,
     db_tx: Sender<db::Request>,
@@ -423,6 +427,7 @@ impl Viewer {
         let (db_tx, db_rx) = db::start_catalog(dsn.clone(), ctx.clone(), active_generation.clone(),catalog_id.clone(),readonly);
         let (decode_tx, decode_rx,decode_cancel) = decode::start_catalog(ctx.clone(),catalog_id.clone());
         let _ = db_tx.send(db::Request::Explore(explore::Request {
+            model: Default::default(),
             generation,
             phase: 0,
             query: String::new(),
@@ -450,6 +455,7 @@ impl Viewer {
         let _ = db_tx.send(db::Request::SavedViews);
         if !readonly {let _ = db_tx.send(db::Request::BackfillVisuals);}
         let mut viewer = Self {
+            embedding_model: Default::default(),
             catalog_panel: catalogs::Panel::new(context,&ctx),
             external_catalog_selector:false,
             db_tx,
@@ -780,13 +786,14 @@ impl Viewer {
         }
         while let Ok(event) = self.model_rx.try_recv() {
             match event {
-                model::Event::Ready => {
+                model::Event::Ready { generation } if generation == self.generation => {
                     self.model_ready = true;
                     self.model_error = None;
                     self.message = "Visual search ready".into();
 
                 }
                 model::Event::Vector { generation, vector } if generation == self.generation => {
+                    self.model_ready = true;
                     let key = self.pending_model_key.take().unwrap_or_else(|| self.query_key());
                     if key != self.query_key() { self.submit_search(); continue; }
                     self.cached_vector = Some((key, vector));
@@ -871,14 +878,16 @@ impl Viewer {
     fn submit_search(&mut self) {self.begin_search(200);}
 
     fn query_key(&self) -> String {
-        self.image_search.key().unwrap_or_else(|| self.search.clone())
+        let key = self.image_search.key().unwrap_or_else(|| self.search.clone());
+        if key.is_empty() || self.embedding_model == embedding_models::EmbeddingModel::OpenClip { key }
+        else { format!("{}:{key}", self.embedding_model.key()) }
     }
 
     fn model_request(&self) -> model::Request {
         if let Some(path) = &self.image_search.path {
-            model::Request::EncodeImage { generation: self.generation, path: path.clone() }
+            model::Request::EncodeImage { generation: self.generation, path: path.clone(), model: self.embedding_model }
         } else {
-            model::Request::Encode { generation: self.generation, text: self.search.clone() }
+            model::Request::Encode { generation: self.generation, text: self.search.clone(), model: self.embedding_model }
         }
     }
 
@@ -950,6 +959,7 @@ impl Viewer {
             None
         };
         let _ = self.db_tx.send(db::Request::Explore(explore::Request {
+            model: self.embedding_model,
             generation: self.generation,
             phase: self.phase,
             query: self.search.clone(),
@@ -1328,6 +1338,7 @@ impl Viewer {
 
     fn saved_state(&self) -> serde_json::Value {
         serde_json::to_value(SavedState {
+            embedding_model: self.embedding_model,
             search: self.search.clone(), folder: self.map_root.clone(),
             reference_image: self.image_search.path.clone(),
             visual_source: self.visual_source,
@@ -1345,6 +1356,12 @@ impl Viewer {
     fn restore_state(&mut self, state: serde_json::Value) {
         match serde_json::from_value::<SavedState>(state) {
             Ok(state) => {
+                if self.embedding_model != state.embedding_model {
+                    self.cached_vector = None;
+                    self.model_error = None;
+                    self.model_ready = false;
+                }
+                self.embedding_model = state.embedding_model;
                 self.search = state.search;
                 self.image_search.path = state.reference_image;
                 self.visual_source = state.visual_source;
@@ -1368,6 +1385,15 @@ impl Viewer {
     }
 
     fn images_ui(&mut self, ui: &mut egui::Ui) {
+        if self.embedding_model.controls(ui) {
+            self.cached_vector = None;
+            self.model_error = None;
+            self.model_ready = false;
+            self.submit_search();
+        }
+        if self.embedding_model == embedding_models::EmbeddingModel::EmbeddingGemma2 {
+            ui.small("Searches images indexed with EmbeddingGemma 2. See the README to build this model's index.");
+        }
         if let Some(action) = self.image_search.controls(ui) { self.reference_action(action); }
         ui.horizontal_wrapped(|ui| {
             ui.label("Search photos");
@@ -1393,7 +1419,7 @@ impl Viewer {
             }
             ui.label(format!("{} {}", self.total_results,
                 if self.view_mode == ViewMode::Stacks { "stacks" } else { "images" })).on_hover_text("Total filtered results, including pages not loaded yet");
-            if self.embedded < self.indexed {
+            if self.embedding_model == embedding_models::EmbeddingModel::OpenClip && self.embedded < self.indexed {
                 ui.add(egui::Label::new(format!("Visual index: {}/{}",self.embedded,self.indexed)).extend()).on_hover_text("Images with compatible visual-search embeddings / indexed images");
             }
         });
@@ -1409,7 +1435,7 @@ impl Viewer {
             } else if !self.model_ready {
                 ui.horizontal_wrapped(|ui| {
                     ui.spinner();
-                    ui.label("Loading OpenCLIP; your search will run when it is ready…");
+                    ui.label(format!("Loading {}; your search will run when it is ready…",self.embedding_model.label()));
                 });
             } else if self.visual_pending {
                 ui.horizontal_wrapped(|ui| {

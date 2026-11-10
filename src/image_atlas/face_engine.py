@@ -38,6 +38,7 @@ class FaceEngine:
         except ImportError as exc:
             raise RuntimeError("Install the vision extra: pip install -e '.[vision]'") from exc
         self.cv2 = cv2
+        self.device = 'cpu'  # FaceDetectorYN / FaceRecognizerSF use their default OpenCV CPU backend.
         cv2.setNumThreads(1)
         if hasattr(cv2, 'setLogLevel'):
             cv2.setLogLevel(2)
